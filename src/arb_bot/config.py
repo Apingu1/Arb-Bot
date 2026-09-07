@@ -108,6 +108,38 @@ class Settings:
         default_factory=lambda: _decimal_tuple("HEDGE_TAKER_REBATE_SCENARIOS", "0,0.03,0.08,0.18,0.30,0.50")
     )
 
+    # Phase 1.5 EV-frontier instrumentation.
+    hedge_ghost_enabled: bool = field(default_factory=lambda: _bool("HEDGE_GHOST_ENABLED", True))
+    hedge_ghost_horizon_ms: int = field(default_factory=lambda: _int("HEDGE_GHOST_HORIZON_MS", 15000))
+    hedge_ghost_max_active: int = field(default_factory=lambda: _int("HEDGE_GHOST_MAX_ACTIVE", 500))
+
+    ev_frontier_enabled: bool = field(default_factory=lambda: _bool("EV_FRONTIER_ENABLED", True))
+    ev_grace_edge_target: Decimal = field(default_factory=lambda: _decimal("EV_GRACE_EDGE_TARGET", "0.005"))
+    ev_grace_latency_ms: int = field(default_factory=lambda: _int("EV_GRACE_LATENCY_MS", 100))
+    ev_grace_periods_ms: tuple[int, ...] = field(
+        default_factory=lambda: _int_tuple("EV_GRACE_PERIODS_MS", "0,100,250,500")
+    )
+    ev_grace_trade_shares: Decimal = field(default_factory=lambda: _decimal("EV_GRACE_TRADE_SHARES", "5"))
+    ev_hard_loss_per_share: Decimal = field(default_factory=lambda: _decimal("EV_HARD_LOSS_PER_SHARE", "0.005"))
+
+    ev_size_edge_target: Decimal = field(default_factory=lambda: _decimal("EV_SIZE_EDGE_TARGET", "0.005"))
+    ev_size_latency_ms: int = field(default_factory=lambda: _int("EV_SIZE_LATENCY_MS", 100))
+    ev_size_grace_ms: int = field(default_factory=lambda: _int("EV_SIZE_GRACE_MS", 250))
+    ev_size_candidates: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("EV_SIZE_CANDIDATES", "5,10,20,50")
+    )
+
+    # Split 1 pUSD into both outcomes, then shadow passive sells on both legs.
+    split_sell_enabled: bool = field(default_factory=lambda: _bool("SPLIT_SELL_ENABLED", True))
+    split_sell_edge_targets: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("SPLIT_SELL_EDGE_TARGETS", "0.005,0.010,0.015")
+    )
+    split_sell_shares: Decimal = field(default_factory=lambda: _decimal("SPLIT_SELL_SHARES", "5"))
+    split_sell_max_quote_age_ms: int = field(default_factory=lambda: _int("SPLIT_SELL_MAX_QUOTE_AGE_MS", 30000))
+    split_sell_inventory_timeout_ms: int = field(default_factory=lambda: _int("SPLIT_SELL_INVENTORY_TIMEOUT_MS", 5000))
+    split_sell_requote_cooldown_ms: int = field(default_factory=lambda: _int("SPLIT_SELL_REQUOTE_COOLDOWN_MS", 500))
+    split_sell_min_seconds_to_expiry: int = field(default_factory=lambda: _int("SPLIT_SELL_MIN_SECONDS_TO_EXPIRY", 30))
+
     empirical_risk_min_samples: int = field(default_factory=lambda: _int("EMPIRICAL_RISK_MIN_SAMPLES", 20))
     use_empirical_risk_reserve: bool = field(default_factory=lambda: _bool("USE_EMPIRICAL_RISK_RESERVE", False))
 
