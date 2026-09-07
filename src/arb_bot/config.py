@@ -17,6 +17,11 @@ def _int(name: str, default: int) -> int:
     return int(_env(name, str(default)))
 
 
+def _bool(name: str, default: bool) -> bool:
+    raw = _env(name, "true" if default else "false").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     market_query: str = field(default_factory=lambda: _env("MARKET_QUERY", "BTC Up or Down 15m"))
@@ -33,6 +38,22 @@ class Settings:
     market_refresh_seconds: int = field(default_factory=lambda: _int("MARKET_REFRESH_SECONDS", 60))
     diagnostic_interval_seconds: int = field(default_factory=lambda: _int("DIAGNOSTIC_INTERVAL_SECONDS", 10))
     edge_record_min_interval_ms: int = field(default_factory=lambda: _int("EDGE_RECORD_MIN_INTERVAL_MS", 0))
+
+    maker_enabled: bool = field(default_factory=lambda: _bool("MAKER_SHADOW_ENABLED", True))
+    maker_trade_shares: Decimal = field(default_factory=lambda: _decimal("MAKER_TRADE_SHARES", "5"))
+    maker_min_gross_edge_per_share: Decimal = field(default_factory=lambda: _decimal("MAKER_MIN_GROSS_EDGE_PER_SHARE", "0.005"))
+    maker_order_ttl_ms: int = field(default_factory=lambda: _int("MAKER_ORDER_TTL_MS", 1500))
+    maker_inventory_timeout_ms: int = field(default_factory=lambda: _int("MAKER_INVENTORY_TIMEOUT_MS", 2500))
+
+    hybrid_enabled: bool = field(default_factory=lambda: _bool("HYBRID_SHADOW_ENABLED", True))
+    hybrid_trade_shares: Decimal = field(default_factory=lambda: _decimal("HYBRID_TRADE_SHARES", "5"))
+    hybrid_min_net_edge_per_share: Decimal = field(default_factory=lambda: _decimal("HYBRID_MIN_NET_EDGE_PER_SHARE", "0.003"))
+    hybrid_completion_latency_ms: int = field(default_factory=lambda: _int("HYBRID_COMPLETION_LATENCY_MS", 100))
+    hybrid_inventory_timeout_ms: int = field(default_factory=lambda: _int("HYBRID_INVENTORY_TIMEOUT_MS", 2500))
+
+    empirical_risk_min_samples: int = field(default_factory=lambda: _int("EMPIRICAL_RISK_MIN_SAMPLES", 20))
+    use_empirical_risk_reserve: bool = field(default_factory=lambda: _bool("USE_EMPIRICAL_RISK_RESERVE", False))
+
     output_path: str = field(default_factory=lambda: _env("OUTPUT_PATH", "data/shadow_events.jsonl"))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO").upper())
     run_seconds: int = field(default_factory=lambda: _int("RUN_SECONDS", 0))
