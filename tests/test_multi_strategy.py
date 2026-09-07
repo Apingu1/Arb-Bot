@@ -107,9 +107,29 @@ def test_taker_leg_miss_waits_for_recovery_latency_and_uses_later_book(tmp_path,
     assert taker.last_summary is not None
     assert taker.last_summary["recovery"]["actual_recovery_latency_ms"] >= Decimal("100")
     assert taker.last_summary["recovery"]["completion_quote"]["average_price"] == Decimal("0.60")
+    assert taker.last_summary["initial_execution"]["leg_a"]["average_price"] == Decimal("0.45")
 
 
-def test_maker_engine_requires_both_passive_fills_and_books_profit(tmp_path, monkeypatch):
+def test_last_trade_event_is_routed_to_token_book():
+    settings = _settings()
+    engine = _engine(settings)
+    touched = engine.apply_event(
+        {
+            "event_type": "last_trade_price",
+            "asset_id": "A",
+            "price": "0.48",
+            "size": "7",
+            "side": "SELL",
+            "timestamp": "123",
+        }
+    )
+    assert touched == "m-live"
+    assert engine.books["A"].last_trade_price == Decimal("0.48")
+    assert engine.books["A"].last_trade_size == Decimal("7")
+    assert engine.books["A"].last_trade_side == "SELL"
+
+
+def test_maker_engine_requires_confirming_sell_trades_on_both_legs(tmp_path, monkeypatch):
     monkeypatch.setattr(maker_module, "market_phase", lambda pair: MarketPhase.LIVE)
     settings = _settings()
     engine = _engine(settings)
@@ -127,17 +147,40 @@ def test_maker_engine_requires_both_passive_fills_and_books_profit(tmp_path, mon
     assert maker.placed == 1
     assert maker.completed == 0
 
-    # Ask touches each resting maker bid in turn.
-    engine.books["A"].apply_snapshot([], [{"price": "0.48", "size": "100"}])
+    engine.books["A"].apply_trade("0.48", "5", "SELL", "trade-a")
     maker.on_market_update(engine, "m-live")
     assert maker.completed == 0
 
-    engine.books["B"].apply_snapshot([], [{"price": "0.50", "size": "100"}])
+    engine.books["B"].apply_trade("0.50", "5", "SELL", "trade-b")
     maker.on_market_update(engine, "m-live")
 
     assert maker.completed == 1
     assert maker.total_pnl == Decimal("0.10")
     assert maker.equity.equity == Decimal("0.10")
+
+
+def test_maker_does_not_credit_small_or_wrong_side_trade(tmp_path, monkeypatch):
+    monkeypatch.setattr(maker_module, "market_phase", lambda pair: MarketPhase.LIVE)
+    settings = _settings()
+    engine = _engine(settings)
+    engine.books["A"].apply_snapshot(
+        [{"price": "0.48", "size": "100"}],
+        [{"price": "0.49", "size": "100"}],
+    )
+    engine.books["B"].apply_snapshot(
+        [{"price": "0.50", "size": "100"}],
+        [{"price": "0.51", "size": "100"}],
+    )
+    maker = MakerShadowEngine(settings, JsonlRecorder(str(tmp_path / "maker-filter.jsonl")))
+    maker.on_market_update(engine, "m-live")
+
+    engine.books["A"].apply_trade("0.48", "4.99", "SELL", "too-small")
+    maker.on_market_update(engine, "m-live")
+    assert maker.campaigns["m-live"].filled_a is False
+
+    engine.books["A"].apply_trade("0.48", "10", "BUY", "wrong-side")
+    maker.on_market_update(engine, "m-live")
+    assert maker.campaigns["m-live"].filled_a is False
 
 
 def test_hybrid_maker_first_then_single_taker_leg_can_complete(tmp_path, monkeypatch):
@@ -157,9 +200,9 @@ def test_hybrid_maker_first_then_single_taker_leg_can_complete(tmp_path, monkeyp
     hybrid.on_market_update(engine, "m-live")
     assert hybrid.placed == 1
 
-    # A maker leg fills at 0.40; B remains above its maker bid but is cheap
-    # enough to complete as one taker leg after fees.
-    engine.books["A"].apply_snapshot([], [{"price": "0.40", "size": "100"}])
+    # A maker leg is confirmed by a SELL trade at our bid; B remains above its
+    # maker bid but is cheap enough to complete as a single taker leg after fees.
+    engine.books["A"].apply_trade("0.40", "5", "SELL", "maker-a")
     hybrid.on_market_update(engine, "m-live")
     assert hybrid.campaigns["m-live"].filled_a is True
     assert hybrid.campaigns["m-live"].completion is not None
