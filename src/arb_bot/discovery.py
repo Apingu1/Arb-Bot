@@ -173,6 +173,7 @@ class MarketDiscovery:
         pairs: list[MarketPair] = []
         seen_market_ids: set[str] = set()
         rejected: Counter[str] = Counter()
+        phase_rejections: Counter[str] = Counter()
         diagnostic_sample: dict[str, Any] | None = None
 
         for event in events:
@@ -190,62 +191,69 @@ class MarketDiscovery:
                 markets = [event]
             if not markets:
                 rejected["event_without_markets"] += 1
+                phase_rejections[f"{event_phase.value}:event_without_markets"] += 1
                 continue
 
             for market in markets:
                 if not isinstance(market, dict):
                     rejected["invalid_market_shape"] += 1
+                    phase_rejections[f"{event_phase.value}:invalid_market_shape"] += 1
                     continue
-
-                if diagnostic_sample is None:
-                    diagnostic_sample = {
-                        "event_slug": event_slug,
-                        "event_phase": event_phase.value,
-                        "market_slug": market.get("slug"),
-                        "active": market.get("active"),
-                        "closed": market.get("closed"),
-                        "enableOrderBook": market.get("enableOrderBook"),
-                        "acceptingOrders": market.get("acceptingOrders"),
-                        "clobTokenIds_present": bool(market.get("clobTokenIds")),
-                        "outcomes": market.get("outcomes"),
-                    }
 
                 question = str(market.get("question") or event.get("title") or "")
                 slug = str(market.get("slug") or event_slug or market.get("id") or "unknown")
                 recurring_window = btc_15m_window_from_slug(slug) or event_window
                 recurring_phase = classify_btc_15m_slug(slug, now) if btc_15m_window_from_slug(slug) else event_phase
 
-                # For the deterministic BTC 15m recurring series, time encoded in
-                # the slug is authoritative. Gamma lifecycle flags may lag around
-                # the opening/closing boundary, so LIVE/NEXT recurring markets are
-                # allowed through even when those generic flags are stale.
+                if diagnostic_sample is None or recurring_phase in {MarketPhase.LIVE, MarketPhase.NEXT}:
+                    diagnostic_sample = {
+                        "event_slug": event_slug,
+                        "event_phase": event_phase.value,
+                        "market_slug": slug,
+                        "market_phase": recurring_phase.value,
+                        "active": market.get("active"),
+                        "closed": market.get("closed"),
+                        "enableOrderBook": market.get("enableOrderBook"),
+                        "acceptingOrders": market.get("acceptingOrders"),
+                        "clobTokenIds_present": bool(market.get("clobTokenIds")),
+                        "tokens_present": bool(market.get("tokens")),
+                        "outcomes": market.get("outcomes"),
+                    }
+
                 if recurring_window:
                     if recurring_phase is MarketPhase.EXPIRED:
                         rejected["expired"] += 1
+                        phase_rejections[f"{recurring_phase.value}:expired"] += 1
                         continue
                 else:
                     if market.get("closed") is True:
                         rejected["closed"] += 1
+                        phase_rejections[f"{recurring_phase.value}:closed"] += 1
                         continue
                     if market.get("active") is False:
                         rejected["inactive"] += 1
+                        phase_rejections[f"{recurring_phase.value}:inactive"] += 1
                         continue
 
                 if market.get("enableOrderBook") is False and recurring_phase not in {MarketPhase.LIVE, MarketPhase.NEXT}:
                     rejected["orderbook_disabled"] += 1
+                    phase_rejections[f"{recurring_phase.value}:orderbook_disabled"] += 1
                     continue
 
                 tokens, outcomes = _token_outcomes(market)
                 if len(tokens) != 2:
                     rejected["missing_tokens"] += 1
+                    phase_rejections[f"{recurring_phase.value}:missing_tokens"] += 1
                     continue
                 if len(outcomes) != 2:
                     rejected["missing_outcomes"] += 1
+                    phase_rejections[f"{recurring_phase.value}:missing_outcomes"] += 1
                     continue
 
                 market_text = f"{question} {slug} {event.get('title') or ''}".lower()
                 if "up" not in market_text or "down" not in market_text:
                     rejected["not_up_down"] += 1
+                    phase_rejections[f"{recurring_phase.value}:not_up_down"] += 1
                     continue
 
                 if recurring_window:
@@ -256,11 +264,13 @@ class MarketDiscovery:
                     parsed_end = _parse_time(end_date)
                     if parsed_end and parsed_end <= now:
                         rejected["expired"] += 1
+                        phase_rejections[f"{recurring_phase.value}:expired"] += 1
                         continue
 
                 market_id = str(market.get("id") or market.get("conditionId") or slug)
                 if market_id in seen_market_ids:
                     rejected["duplicate"] += 1
+                    phase_rejections[f"{recurring_phase.value}:duplicate"] += 1
                     continue
                 seen_market_ids.add(market_id)
 
@@ -279,10 +289,12 @@ class MarketDiscovery:
                 )
 
         pairs.sort(key=lambda p: btc_15m_window_from_slug(p.slug)[0] if btc_15m_window_from_slug(p.slug) else (_parse_time(p.end_date) or datetime.max.replace(tzinfo=timezone.utc)))
-        if not pairs and rejected:
+        phases = Counter(classify_btc_15m_slug(pair.slug, now).value for pair in pairs)
+        if not pairs or not ({MarketPhase.LIVE.value, MarketPhase.NEXT.value} & set(phases)):
             log.warning("Discovery rejection summary: %s", dict(rejected))
+            log.warning("Discovery rejection by phase: %s", dict(phase_rejections))
             if diagnostic_sample:
-                log.warning("Discovery sample market fields: %s", diagnostic_sample)
+                log.warning("Discovery relevant market sample: %s", diagnostic_sample)
         return pairs
 
     async def discover(self) -> list[MarketPair]:
@@ -291,10 +303,16 @@ class MarketDiscovery:
             direct_events = await self._discover_recurring_events(client, now)
             search_events = await self._search_events(client)
 
+        # Direct deterministic slug lookups are authoritative. Search is only a
+        # fallback and must never overwrite a fresher/more complete direct event
+        # with an optimized/truncated search representation of the same event.
         events_by_key: dict[str, dict[str, Any]] = {}
-        for event in [*direct_events, *search_events]:
+        for event in direct_events:
             key = str(event.get("id") or event.get("slug") or id(event))
             events_by_key[key] = event
+        for event in search_events:
+            key = str(event.get("id") or event.get("slug") or id(event))
+            events_by_key.setdefault(key, event)
 
         pairs = self._pairs_from_events(list(events_by_key.values()), now)
         phases = Counter(classify_btc_15m_slug(pair.slug, now).value for pair in pairs)
