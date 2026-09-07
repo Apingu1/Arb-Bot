@@ -17,7 +17,7 @@ ZERO = Decimal("0")
 
 
 class LiveDiagnostics:
-    """Periodic visibility into feed health and current-window economics."""
+    """Periodic visibility into feed health, market economics and shadow strategies."""
 
     def __init__(self, interval_seconds: int) -> None:
         self.interval_seconds = max(1, interval_seconds)
@@ -42,7 +42,7 @@ class LiveDiagnostics:
     def due(self) -> bool:
         return time.monotonic() - self.last_log >= self.interval_seconds
 
-    def maybe_log(self, engine: ArbitrageEngine, shadow, edge_tracker: EdgeTracker) -> None:
+    def maybe_log(self, engine: ArbitrageEngine, taker, edge_tracker: EdgeTracker, maker=None, hybrid=None) -> None:
         now = time.monotonic()
         if now - self.last_log < self.interval_seconds:
             return
@@ -57,7 +57,7 @@ class LiveDiagnostics:
         next_count = sum(1 for pair in engine.pairs.values() if market_phase(pair, now_utc) == MarketPhase.NEXT)
 
         log.info(
-            "LIVE heartbeat | messages=%d (+%d, %.1f/s) book=%d price_change=%d touched=%d | books_ready=%d/%d | windows LIVE=%d NEXT=%d | shadow pending=%d completed=%d leg_misses=%d rejected=%d pnl=%+.4f pUSD",
+            "LIVE heartbeat | messages=%d (+%d, %.1f/s) book=%d price_change=%d touched=%d | books_ready=%d/%d | windows LIVE=%d NEXT=%d",
             self.total_messages,
             new_messages,
             rate,
@@ -68,11 +68,33 @@ class LiveDiagnostics:
             len(engine.books),
             live_count,
             next_count,
-            len(shadow.pending),
-            shadow.completed,
-            shadow.leg_misses,
-            shadow.rejected,
-            float(shadow.total_pnl),
+        )
+
+        risk = taker.empirical_risk
+        log.info(
+            "STRATEGIES | TAKER eq=%+.4f pending=%d completed=%d misses=%d rejected=%d attempts=%d miss_rate=%.1f%% empirical_reserve=%s/share | MAKER eq=%+.4f pending=%d placed=%d completed=%d one_sided=%d cancelled=%d | HYBRID eq=%+.4f pending=%d placed=%d completed=%d maker_only=%d maker+taker=%d taker_misses=%d one_sided=%d",
+            float(taker.total_pnl),
+            taker.pending_count,
+            taker.completed,
+            taker.leg_misses,
+            taker.rejected,
+            risk.attempts,
+            float(risk.miss_probability * Decimal("100")),
+            self._fmt(risk.estimated_reserve_per_share if risk.attempts else None),
+            float(maker.total_pnl) if maker else 0.0,
+            maker.pending_count if maker else 0,
+            maker.placed if maker else 0,
+            maker.completed if maker else 0,
+            maker.one_sided_unwinds if maker else 0,
+            maker.cancelled if maker else 0,
+            float(hybrid.total_pnl) if hybrid else 0.0,
+            hybrid.pending_count if hybrid else 0,
+            hybrid.placed if hybrid else 0,
+            hybrid.completed if hybrid else 0,
+            hybrid.completed_both_maker if hybrid else 0,
+            hybrid.completed_with_taker if hybrid else 0,
+            hybrid.completion_misses if hybrid else 0,
+            hybrid.one_sided_unwinds if hybrid else 0,
         )
 
         ordered = sorted(
@@ -113,6 +135,8 @@ class LiveDiagnostics:
 
             raw_pair = ask_a + ask_b
             raw_edge = Decimal("1") - raw_pair
+            maker_pair = bid_a + bid_b if bid_a is not None and bid_b is not None else None
+            maker_edge = Decimal("1") - maker_pair if maker_pair is not None else None
             shares = engine.settings.min_trade_shares
             quote_a = a.quote_buy(shares)
             quote_b = b.quote_buy(shares)
@@ -123,12 +147,12 @@ class LiveDiagnostics:
                 fees = taker_fee(quote_a.segments, engine.settings.crypto_taker_fee_rate) + taker_fee(
                     quote_b.segments, engine.settings.crypto_taker_fee_rate
                 )
-                risk = shares * engine.settings.risk_buffer_per_share
-                net = shares - quote_a.notional - quote_b.notional - fees - risk
+                risk_reserve = shares * engine.settings.risk_buffer_per_share
+                net = shares - quote_a.notional - quote_b.notional - fees - risk_reserve
                 net_edge = net / shares
                 executable_pair = (quote_a.notional + quote_b.notional) / shares
                 log.info(
-                    "%s %s %s | %s %s/%s ask_depth=%s | %s %s/%s ask_depth=%s | top_pair=%s raw=%+.4f | %ssh VWAP=%s fees=%.4f risk=%.4f net=%+.4f/share | best_pair=%s best_raw=%s best_net=%s obs=%d",
+                    "%s %s %s | %s %s/%s ask_depth=%s | %s %s/%s ask_depth=%s | taker_pair=%s raw=%+.4f %ssh_VWAP=%s fees=%.4f risk=%.4f net=%+.4f/share | maker_bids=%s maker_edge=%s | best_taker_pair=%s best_raw=%s best_net=%s obs=%d",
                     phase.value,
                     pair.slug,
                     window_text,
@@ -145,8 +169,10 @@ class LiveDiagnostics:
                     self._fmt(shares),
                     self._fmt(executable_pair),
                     float(fees),
-                    float(risk),
+                    float(risk_reserve),
                     float(net_edge),
+                    self._fmt(maker_pair),
+                    self._fmt_signed(maker_edge),
                     self._fmt(stats.best_pair_price if stats else None),
                     self._fmt_signed(stats.best_raw_edge if stats else None),
                     self._fmt_signed(stats.best_net_edge if stats else None),
@@ -154,7 +180,7 @@ class LiveDiagnostics:
                 )
             else:
                 log.info(
-                    "%s %s %s | %s %s/%s %s %s/%s | top_pair=%s raw=%+.4f | insufficient depth for %ssh | best_pair=%s obs=%d",
+                    "%s %s %s | %s %s/%s %s %s/%s | taker_pair=%s raw=%+.4f | insufficient depth for %ssh | maker_bids=%s maker_edge=%s | best_taker_pair=%s obs=%d",
                     phase.value,
                     pair.slug,
                     window_text,
@@ -167,6 +193,8 @@ class LiveDiagnostics:
                     self._fmt(raw_pair),
                     float(raw_edge),
                     self._fmt(shares),
+                    self._fmt(maker_pair),
+                    self._fmt_signed(maker_edge),
                     self._fmt(stats.best_pair_price if stats else None),
                     stats.observations if stats else 0,
                 )
