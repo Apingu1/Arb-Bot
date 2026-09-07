@@ -32,6 +32,7 @@ class Settings:
     max_book_age_ms: int = field(default_factory=lambda: _int("MAX_BOOK_AGE_MS", 1500))
     market_refresh_seconds: int = field(default_factory=lambda: _int("MARKET_REFRESH_SECONDS", 60))
     diagnostic_interval_seconds: int = field(default_factory=lambda: _int("DIAGNOSTIC_INTERVAL_SECONDS", 10))
+    edge_record_min_interval_ms: int = field(default_factory=lambda: _int("EDGE_RECORD_MIN_INTERVAL_MS", 0))
     output_path: str = field(default_factory=lambda: _env("OUTPUT_PATH", "data/shadow_events.jsonl"))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO").upper())
     run_seconds: int = field(default_factory=lambda: _int("RUN_SECONDS", 0))
