@@ -19,7 +19,7 @@ def _int(name: str, default: int) -> int:
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    market_query: str = field(default_factory=lambda: _env("MARKET_QUERY", "Bitcoin Up or Down"))
+    market_query: str = field(default_factory=lambda: _env("MARKET_QUERY", "BTC Up or Down 15m"))
     min_net_edge_per_share: Decimal = field(default_factory=lambda: _decimal("MIN_NET_EDGE_PER_SHARE", "0.005"))
     min_expected_profit_usdc: Decimal = field(default_factory=lambda: _decimal("MIN_EXPECTED_PROFIT_USDC", "0.10"))
     min_trade_shares: Decimal = field(default_factory=lambda: _decimal("MIN_TRADE_SHARES", "5"))
