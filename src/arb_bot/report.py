@@ -41,7 +41,10 @@ def _load_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def _flat_execution(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-    strategy = SUMMARY_EVENT_TYPES[event_type]
+    if event_type == "maker_variant_execution_summary":
+        strategy = str(payload.get("strategy") or "UNKNOWN")
+    else:
+        strategy = SUMMARY_EVENT_TYPES[event_type]
     recovery = payload.get("recovery") if isinstance(payload.get("recovery"), dict) else {}
     initial = payload.get("initial_execution") if isinstance(payload.get("initial_execution"), dict) else {}
 
@@ -51,6 +54,8 @@ def _flat_execution(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "strategy": strategy,
+        "mode": payload.get("mode"),
+        "target_pair": payload.get("target_pair"),
         "finalized_at": payload.get("finalized_at"),
         "slug": payload.get("slug"),
         "status": payload.get("status"),
@@ -66,19 +71,24 @@ def _flat_execution(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         "recovery_filled_leg": recovery.get("filled_leg"),
         "recovery_completion_avg": (recovery.get("completion_quote") or {}).get("average_price") if isinstance(recovery.get("completion_quote"), dict) else None,
         "recovery_unwind_avg": (recovery.get("unwind_quote") or {}).get("average_price") if isinstance(recovery.get("unwind_quote"), dict) else None,
+        "filled_qty_a": payload.get("filled_qty_a"),
+        "filled_qty_b": payload.get("filled_qty_b"),
+        "matched_qty": payload.get("matched_qty"),
+        "initial_queue_ahead_a": payload.get("initial_queue_ahead_a"),
+        "initial_queue_ahead_b": payload.get("initial_queue_ahead_b"),
+        "maker_inventory_probability": payload.get("maker_inventory_probability"),
+        "maker_avg_inventory_loss_per_share": payload.get("maker_avg_inventory_loss_per_share"),
+        "maker_empirical_reserve_per_share": payload.get("maker_empirical_reserve_per_share"),
         "realized_pnl": payload.get("realized_pnl"),
         "equity_after": payload.get("equity_after"),
     }
 
 
 def _flat_legacy_taker(payload: dict[str, Any], equity_after: Decimal) -> dict[str, Any]:
-    """Convert a Phase 1 legacy `shadow_result` into the report schema.
-
-    Phase 1 did not persist the richer detection/execution metadata now available
-    in Phase 1.2, so unavailable fields remain blank rather than being guessed.
-    """
     return {
         "strategy": "TAKER",
+        "mode": None,
+        "target_pair": None,
         "finalized_at": None,
         "slug": payload.get("slug"),
         "status": payload.get("status"),
@@ -94,6 +104,14 @@ def _flat_legacy_taker(payload: dict[str, Any], equity_after: Decimal) -> dict[s
         "recovery_filled_leg": None,
         "recovery_completion_avg": None,
         "recovery_unwind_avg": None,
+        "filled_qty_a": None,
+        "filled_qty_b": None,
+        "matched_qty": None,
+        "initial_queue_ahead_a": None,
+        "initial_queue_ahead_b": None,
+        "maker_inventory_probability": None,
+        "maker_avg_inventory_loss_per_share": None,
+        "maker_empirical_reserve_per_share": None,
         "realized_pnl": payload.get("pnl_usdc"),
         "equity_after": equity_after,
     }
@@ -111,10 +129,9 @@ def build_report(path: Path) -> tuple[dict[str, dict[str, Any]], list[dict[str, 
             executions.append(_flat_execution(str(event_type), payload))
             if event_type == "taker_execution_summary":
                 has_modern_taker_summary = True
+        elif event_type == "maker_variant_execution_summary" and isinstance(payload, dict):
+            executions.append(_flat_execution(str(event_type), payload))
 
-    # Phase 1 wrote `shadow_result` but not `taker_execution_summary`. New
-    # Phase 1.2 writes both, so only use legacy rows when there are no modern
-    # taker summaries in the file; this prevents double-counting new runs.
     if not has_modern_taker_summary:
         legacy_equity = Decimal("0")
         for row in events:
@@ -126,8 +143,12 @@ def build_report(path: Path) -> tuple[dict[str, dict[str, Any]], list[dict[str, 
             legacy_equity += _d(payload.get("pnl_usdc"))
             executions.append(_flat_legacy_taker(payload, legacy_equity))
 
+    strategy_names = sorted({str(row.get("strategy") or "UNKNOWN") for row in executions})
+    # Keep TAKER first, then pure maker targets, then hybrid targets.
+    strategy_names.sort(key=lambda name: (0 if name == "TAKER" else 1 if name.startswith("MAKER") else 2, name))
+
     summary: dict[str, dict[str, Any]] = {}
-    for strategy in ("TAKER", "MAKER", "HYBRID"):
+    for strategy in strategy_names:
         rows = [row for row in executions if row["strategy"] == strategy]
         statuses = Counter(str(row.get("status") or "UNKNOWN") for row in rows)
         pnl = sum((_d(row.get("realized_pnl")) for row in rows), Decimal("0"))
@@ -149,6 +170,8 @@ def write_csv(rows: list[dict[str, Any]], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "strategy",
+        "mode",
+        "target_pair",
         "finalized_at",
         "slug",
         "status",
@@ -164,6 +187,14 @@ def write_csv(rows: list[dict[str, Any]], path: Path) -> None:
         "recovery_filled_leg",
         "recovery_completion_avg",
         "recovery_unwind_avg",
+        "filled_qty_a",
+        "filled_qty_b",
+        "matched_qty",
+        "initial_queue_ahead_a",
+        "initial_queue_ahead_b",
+        "maker_inventory_probability",
+        "maker_avg_inventory_loss_per_share",
+        "maker_empirical_reserve_per_share",
         "realized_pnl",
         "equity_after",
     ]
@@ -174,7 +205,7 @@ def write_csv(rows: list[dict[str, Any]], path: Path) -> None:
 
 
 def cli() -> None:
-    parser = argparse.ArgumentParser(description="Summarize TAKER / MAKER / HYBRID shadow performance")
+    parser = argparse.ArgumentParser(description="Summarize TAKER and queue-aware MAKER/HYBRID shadow variants")
     parser.add_argument("path", nargs="?", default="data/shadow_events.jsonl", help="Shadow JSONL path")
     parser.add_argument("--csv", dest="csv_path", default=None, help="Optional flat execution CSV output path")
     args = parser.parse_args()
@@ -182,12 +213,13 @@ def cli() -> None:
     path = Path(args.path)
     summary, executions = build_report(path)
     print(f"Shadow strategy report: {path}")
-    print("=" * 78)
-    for strategy in ("TAKER", "MAKER", "HYBRID"):
-        item = summary[strategy]
+    print("=" * 100)
+    if not summary:
+        print("No finalized strategy events found.")
+    for strategy, item in summary.items():
         statuses = ", ".join(f"{key}={value}" for key, value in sorted(item["statuses"].items())) or "none"
         print(
-            f"{strategy:6s} | events={item['events']:4d} wins={item['wins']:4d} "
+            f"{strategy:10s} | events={item['events']:4d} wins={item['wins']:4d} "
             f"losses={item['losses']:4d} flats={item['flats']:4d} "
             f"pnl={float(item['pnl']):+.4f} pUSD | {statuses}"
         )
