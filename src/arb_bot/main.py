@@ -12,6 +12,7 @@ from .config import Settings
 from .diagnostics import LiveDiagnostics
 from .discovery import MarketPhase, MarketDiscovery, market_phase, select_live_and_next_pairs
 from .edge_tracker import EdgeTracker
+from .ev_frontier import EVFrontierSuite, SplitSellResearchSuite
 from .hedgeable_research import HedgeableResearchSuite
 from .maker_research import MakerResearchSuite
 from .polymarket_ws import PolymarketMarketStream
@@ -47,7 +48,7 @@ async def run() -> None:
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
     log.warning(
-        "PHASE 1.4 HEDGEABILITY-FIRST SHADOW MODE: TAKER + Phase 1.3 MAKER/HYBRID controls + HEDGE maker->taker variants are simulation-only; live order placement is not implemented."
+        "PHASE 1.5 EV-FRONTIER SHADOW MODE: TAKER + MAKER/HYBRID + HEDGE controls + grace/size EV variants + SPLITSELL are simulation-only; live order placement is not implemented."
     )
     await check_geoblock(settings)
 
@@ -57,6 +58,8 @@ async def run() -> None:
     taker = ShadowExecutor(settings, recorder)
     research = MakerResearchSuite(settings, recorder)
     hedge = HedgeableResearchSuite(settings, recorder, research.regime)
+    frontier = EVFrontierSuite(settings, recorder, research.regime)
+    split_sell = SplitSellResearchSuite(settings, recorder, research.regime)
     edge_tracker = EdgeTracker(recorder, settings.edge_record_min_interval_ms)
     diagnostics = LiveDiagnostics(settings.diagnostic_interval_seconds)
     stream = PolymarketMarketStream(settings.websocket_url)
@@ -66,6 +69,8 @@ async def run() -> None:
         taker.process_due(engine.books)
         research.process_due(engine)
         hedge.process_due(engine)
+        frontier.process_due(engine)
+        split_sell.process_due(engine)
 
     async def handle(message: dict) -> None:
         market_id = engine.apply_event(message)
@@ -86,13 +91,15 @@ async def run() -> None:
             exchange_timestamp=message.get("timestamp"),
         )
 
-        # Phase 1.3 controls observe/update the shared SURGE tracker exactly once.
+        # Phase 1.3 controls update the shared SURGE tracker once.
         research.on_market_update(engine, market_id)
         surge = research.regime.current(market_id)
 
-        # Phase 1.4 counterfactuals see the same external event and regime but
-        # have their own virtual queues, maker fills, hedge timers and equity.
+        # Later research families consume the exact same external event/regime
+        # but maintain independent virtual queues, inventory and equity.
         hedge.on_market_update(engine, market_id, surge)
+        frontier.on_market_update(engine, market_id, surge)
+        split_sell.on_market_update(engine, market_id, surge)
 
         # Pure taker benchmark remains unchanged.
         if phase != MarketPhase.LIVE or not taker.can_submit(market_id):
@@ -110,7 +117,15 @@ async def run() -> None:
         while True:
             await asyncio.sleep(settings.diagnostic_interval_seconds)
             process_strategy_timers()
-            diagnostics.maybe_log(engine, taker, edge_tracker, research=research, hedge=hedge)
+            diagnostics.maybe_log(
+                engine,
+                taker,
+                edge_tracker,
+                research=research,
+                hedge=hedge,
+                frontier=frontier,
+                split_sell=split_sell,
+            )
 
     timer_task = asyncio.create_task(timer_loop(), name="shadow-timers")
     diagnostic_task = asyncio.create_task(diagnostic_loop(), name="live-diagnostics")
@@ -168,8 +183,16 @@ async def run() -> None:
         await asyncio.gather(timer_task, diagnostic_task, return_exceptions=True)
 
     process_strategy_timers()
-    diagnostics.maybe_log(engine, taker, edge_tracker, research=research, hedge=hedge)
-    log.info("Finished Phase 1.4 shadow run | TAKER=%+.4f pUSD", float(taker.total_pnl))
+    diagnostics.maybe_log(
+        engine,
+        taker,
+        edge_tracker,
+        research=research,
+        hedge=hedge,
+        frontier=frontier,
+        split_sell=split_sell,
+    )
+    log.info("Finished Phase 1.5 shadow run | TAKER=%+.4f pUSD", float(taker.total_pnl))
     for row in research.diagnostic_rows():
         log.info(
             "Finished %s | equity=%+.4f completed=%d inventory_exits=%d max_dd=%.4f",
@@ -190,6 +213,27 @@ async def run() -> None:
             row["recovery_completions"],
             row["recovery_unwinds"],
             float(row["max_drawdown"]),
+        )
+    for row in frontier.ranked_rows():
+        log.info(
+            "Finished %s | eq=%+.4f p_fill=%.2f%% p_hedge=%.2f%% model_EV=%+.5f realized_EV=%+.5f ghost=%d/%d",
+            row["strategy"],
+            float(row["equity"]),
+            float(row["p_fill"] * 100),
+            float(row["p_hedge_given_fill"] * 100),
+            float(row["modeled_ev_per_placement"]),
+            float(row["realized_ev_per_placement"]),
+            row["ghost_filled"],
+            row["ghost_created"],
+        )
+    for row in split_sell.diagnostic_rows():
+        log.info(
+            "Finished %s | eq=%+.4f p_fill=%.2f%% p_complete=%.2f%% EV/placement=%+.5f",
+            row["strategy"],
+            float(row["equity"]),
+            float(row["p_fill"] * 100),
+            float(row["p_complete_given_fill"] * 100),
+            float(row["ev_per_placement"]),
         )
 
 
