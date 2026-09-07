@@ -20,6 +20,7 @@ RESEARCH_SUMMARY_EVENT_TYPES = {
     "maker_variant_execution_summary",
     "hedge_execution_summary",
     "split_sell_execution_summary",
+    "dual_fok_execution_summary",
 }
 
 
@@ -60,16 +61,23 @@ def _flat_execution(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     initial = payload.get("initial_execution") if isinstance(payload.get("initial_execution"), dict) else {}
 
     detected_pair = payload.get("detected_pair_vwap")
+    if detected_pair is None:
+        detected_pair = payload.get("detected_pair_price")
     if detected_pair is None and payload.get("maker_bid_a") is not None and payload.get("maker_bid_b") is not None:
         detected_pair = _d(payload.get("maker_bid_a")) + _d(payload.get("maker_bid_b"))
 
     return {
         "strategy": strategy,
         "mode": payload.get("mode"),
+        "direction": payload.get("direction"),
         "target_pair": payload.get("target_pair"),
         "target_net_edge_per_share": payload.get("target_net_edge_per_share"),
         "target_edge_per_share": payload.get("target_edge_per_share"),
         "completion_latency_ms": payload.get("completion_latency_ms"),
+        "arrival_skew_ms": payload.get("arrival_skew_ms"),
+        "base_latency_ms": payload.get("base_latency_ms"),
+        "stability_ms": payload.get("stability_ms"),
+        "coverage_multiple": payload.get("coverage_multiple"),
         "grace_ms": payload.get("grace_ms"),
         "fixed_size": payload.get("fixed_size"),
         "regime": payload.get("regime"),
@@ -87,11 +95,15 @@ def _flat_execution(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         "taker_fee_paid": payload.get("taker_fee_paid"),
         "taker_rebate_pnl_scenarios": payload.get("taker_rebate_pnl_scenarios"),
         "detected_pair_price": detected_pair,
+        "detected_edge_per_share": payload.get("detected_edge_per_share"),
+        "detected_coverage_multiple": payload.get("detected_coverage_multiple"),
         "detected_best_ask_a": payload.get("detected_best_ask_a"),
         "detected_best_ask_b": payload.get("detected_best_ask_b"),
         "execution_leg_a_avg": (initial.get("leg_a") or {}).get("average_price") if isinstance(initial.get("leg_a"), dict) else None,
         "execution_leg_b_avg": (initial.get("leg_b") or {}).get("average_price") if isinstance(initial.get("leg_b"), dict) else None,
         "execution_latency_ms": payload.get("actual_execution_latency_ms") or initial.get("actual_latency_ms"),
+        "actual_arrival_a_ms": payload.get("actual_arrival_a_ms"),
+        "actual_arrival_b_ms": payload.get("actual_arrival_b_ms"),
         "recovery_latency_ms": recovery.get("actual_recovery_latency_ms"),
         "recovery_filled_leg": recovery.get("filled_leg"),
         "recovery_completion_avg": (recovery.get("completion_quote") or {}).get("average_price") if isinstance(recovery.get("completion_quote"), dict) else None,
@@ -105,6 +117,7 @@ def _flat_execution(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         "maker_inventory_probability": payload.get("maker_inventory_probability"),
         "maker_avg_inventory_loss_per_share": payload.get("maker_avg_inventory_loss_per_share"),
         "maker_empirical_reserve_per_share": payload.get("maker_empirical_reserve_per_share"),
+        "prepositioned_complete_set_inventory": payload.get("prepositioned_complete_set_inventory"),
         "realized_pnl": payload.get("realized_pnl"),
         "equity_after": payload.get("equity_after"),
     }
@@ -112,20 +125,25 @@ def _flat_execution(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 def _flat_legacy_taker(payload: dict[str, Any], equity_after: Decimal) -> dict[str, Any]:
     return {
-        "strategy": "TAKER", "mode": None, "target_pair": None,
+        "strategy": "TAKER", "mode": None, "direction": None, "target_pair": None,
         "target_net_edge_per_share": None, "target_edge_per_share": None,
-        "completion_latency_ms": None, "grace_ms": None, "fixed_size": None, "regime": None,
+        "completion_latency_ms": None, "arrival_skew_ms": None, "base_latency_ms": None,
+        "stability_ms": None, "coverage_multiple": None, "grace_ms": None, "fixed_size": None, "regime": None,
         "finalized_at": None, "slug": payload.get("slug"), "status": payload.get("status"),
         "action": payload.get("action"), "shares": payload.get("shares"), "maker_side": None,
         "hedge_side": None, "maker_price": None, "maker_fill_qty": None,
         "sell_price_a": None, "sell_price_b": None, "taker_fee_paid": None,
-        "taker_rebate_pnl_scenarios": None, "detected_pair_price": None, "detected_best_ask_a": None,
-        "detected_best_ask_b": None, "execution_leg_a_avg": None, "execution_leg_b_avg": None,
-        "execution_latency_ms": None, "recovery_latency_ms": None, "recovery_filled_leg": None,
+        "taker_rebate_pnl_scenarios": None, "detected_pair_price": None,
+        "detected_edge_per_share": None, "detected_coverage_multiple": None,
+        "detected_best_ask_a": None, "detected_best_ask_b": None,
+        "execution_leg_a_avg": None, "execution_leg_b_avg": None,
+        "execution_latency_ms": None, "actual_arrival_a_ms": None, "actual_arrival_b_ms": None,
+        "recovery_latency_ms": None, "recovery_filled_leg": None,
         "recovery_completion_avg": None, "recovery_unwind_avg": None, "filled_qty_a": None,
         "filled_qty_b": None, "matched_qty": None, "initial_queue_ahead_a": None,
         "initial_queue_ahead_b": None, "initial_queue_ahead": None, "maker_inventory_probability": None,
         "maker_avg_inventory_loss_per_share": None, "maker_empirical_reserve_per_share": None,
+        "prepositioned_complete_set_inventory": None,
         "realized_pnl": payload.get("pnl_usdc"), "equity_after": equity_after,
     }
 
@@ -150,6 +168,9 @@ def _research_activity(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]
                 "pnls": [],
                 "elapsed_ms": [],
             }),
+            "dual_opportunities": 0,
+            "dual_lifetimes_ms": [],
+            "dual_surge_blocks": 0,
         }
     )
     for row in events:
@@ -160,11 +181,17 @@ def _research_activity(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         strategy = str(payload.get("strategy") or "")
         if not strategy:
             continue
-        if event_type in {"hedge_campaign_placed", "split_sell_campaign_placed"}:
+        if event_type in {"hedge_campaign_placed", "split_sell_campaign_placed", "dual_fok_attempt_placed"}:
             stats[strategy]["placements"] += 1
         elif event_type in {"hedge_campaign_cancelled", "split_sell_campaign_cancelled"}:
             stats[strategy]["cancellations"] += 1
             stats[strategy]["cancel_reasons"][str(payload.get("reason") or "UNKNOWN")] += 1
+        elif event_type == "dual_fok_opportunity_started":
+            stats[strategy]["dual_opportunities"] += 1
+        elif event_type == "dual_fok_opportunity_lifetime":
+            stats[strategy]["dual_lifetimes_ms"].append(_d(payload.get("lifetime_ms")))
+        elif event_type == "dual_fok_surge_blocked":
+            stats[strategy]["dual_surge_blocks"] += 1
         elif event_type == "hedge_ghost_outcome":
             stats[strategy]["ghost_outcomes"] += 1
             if payload.get("outcome") != "WOULD_FILL":
@@ -252,7 +279,9 @@ def build_report(path: Path) -> tuple[dict[str, dict[str, Any]], list[dict[str, 
             2 if name.startswith("HYBRID") else
             3 if name.startswith("HEDGE") else
             4 if name.startswith("EV-") else
-            5 if name.startswith("SPLITSELL") else 6,
+            5 if name.startswith("DFOK") else
+            6 if name.startswith("RFOK") else
+            7 if name.startswith("SPLITSELL") else 8,
             name,
         ),
     )
@@ -272,6 +301,7 @@ def build_report(path: Path) -> tuple[dict[str, dict[str, Any]], list[dict[str, 
         ghost_ps = list(act.get("ghost_pnl_per_share", []) or [])
         ghost_elapsed = list(act.get("ghost_elapsed_ms", []) or [])
         ghost_fills = int(act.get("ghost_fills", 0))
+        dual_lifetimes = list(act.get("dual_lifetimes_ms", []) or [])
         sample_status = "REALIZED" if rows else ("GHOST_ONLY" if ghost_fills else "INSUFFICIENT_DATA")
         summary[strategy] = {
             "events": len(rows), "wins": wins, "losses": losses, "flats": flats, "pnl": pnl,
@@ -294,6 +324,10 @@ def build_report(path: Path) -> tuple[dict[str, dict[str, Any]], list[dict[str, 
             "ghost_avg_pnl_per_share": _avg(ghost_ps),
             "ghost_avg_elapsed_ms": _avg(ghost_elapsed),
             "ghost_by_reason": _ghost_reason_summary(act.get("ghost_by_reason", {})),
+            "dual_opportunities": int(act.get("dual_opportunities", 0)),
+            "dual_avg_lifetime_ms": _avg(dual_lifetimes),
+            "dual_median_lifetime_ms": median(dual_lifetimes) if dual_lifetimes else Decimal("0"),
+            "dual_surge_blocks": int(act.get("dual_surge_blocks", 0)),
             "sample_status": sample_status,
         }
     return summary, executions
@@ -309,7 +343,7 @@ def write_csv(rows: list[dict[str, Any]], path: Path) -> None:
 
 
 def cli() -> None:
-    parser = argparse.ArgumentParser(description="Summarize TAKER, MAKER/HYBRID, HEDGE and corrected EV-frontier shadow research")
+    parser = argparse.ArgumentParser(description="Summarize shadow arbitrage research including Phase 1.6 dual-FOK execution")
     parser.add_argument("path", nargs="?", default="data/shadow_events.jsonl", help="Shadow JSONL path")
     parser.add_argument("--csv", dest="csv_path", default=None, help="Optional flat execution CSV output path")
     args = parser.parse_args()
@@ -317,7 +351,7 @@ def cli() -> None:
     path = Path(args.path)
     summary, executions = build_report(path)
     print(f"Shadow strategy report: {path}")
-    print("=" * 160)
+    print("=" * 180)
     if not summary:
         print("No finalized strategy or research events found.")
     for strategy, item in summary.items():
@@ -329,7 +363,13 @@ def cli() -> None:
                 f"EXTREME={item['extreme_events']}/{float(item['extreme_pnl']):+.4f}"
             )
         research = ""
-        if item["placements"] or item["cancellations"] or item["ghost_outcomes"]:
+        if strategy.startswith(("DFOK", "RFOK")):
+            research = (
+                f" | opp={item['dual_opportunities']} placed={item['placements']}"
+                f" life(avg/p50)={float(item['dual_avg_lifetime_ms']):.0f}/{float(item['dual_median_lifetime_ms']):.0f}ms"
+                f" surge_block={item['dual_surge_blocks']}"
+            )
+        elif item["placements"] or item["cancellations"] or item["ghost_outcomes"]:
             reason_text = ",".join(f"{k}:{v}" for k, v in sorted(item["cancel_reasons"].items())) or "-"
             research = (
                 f" | sample={item['sample_status']} placed={item['placements']} cancel={item['cancellations']}[{reason_text}]"
@@ -346,7 +386,7 @@ def cli() -> None:
                     f" avg_t={float(item['ghost_avg_elapsed_ms']):.0f}ms"
                 )
         print(
-            f"{strategy:24s} | events={item['events']:4d} wins={item['wins']:4d} "
+            f"{strategy:40s} | events={item['events']:4d} wins={item['wins']:4d} "
             f"losses={item['losses']:4d} flats={item['flats']:4d} "
             f"pnl={float(item['pnl']):+.4f} pUSD | {statuses}{regime}{research}"
         )
