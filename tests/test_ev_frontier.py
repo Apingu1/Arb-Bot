@@ -98,9 +98,11 @@ def test_grace_variant_waits_before_cancelling(tmp_path, monkeypatch):
     campaign = variant.campaigns["m-live"]
     hedge_token = "B" if campaign.hedge_side == "B" else "A"
     hedge_book = engine.books[hedge_token]
+    # Below the original target but still above the configured hard-loss band,
+    # so this should enter AMBER/grace rather than cancel immediately.
     hedge_book.apply_snapshot(
         [{"price": "0.01", "size": "100"}],
-        [{"price": "0.70", "size": "100"}],
+        [{"price": "0.65", "size": "100"}],
     )
 
     variant.on_market_update(engine, "m-live", SurgeSnapshot(False, ()))
