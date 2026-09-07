@@ -12,6 +12,7 @@ from .config import Settings
 from .diagnostics import LiveDiagnostics
 from .discovery import MarketPhase, MarketDiscovery, market_phase, select_live_and_next_pairs
 from .edge_tracker import EdgeTracker
+from .hedgeable_research import HedgeableResearchSuite
 from .maker_research import MakerResearchSuite
 from .polymarket_ws import PolymarketMarketStream
 from .simulator import ShadowExecutor
@@ -46,7 +47,7 @@ async def run() -> None:
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
     log.warning(
-        "PHASE 1.3 QUEUE-AWARE SHADOW MODE: TAKER + MAKER/HYBRID 99/98/97/96 variants are simulation-only; live order placement is not implemented."
+        "PHASE 1.4 HEDGEABILITY-FIRST SHADOW MODE: TAKER + Phase 1.3 MAKER/HYBRID controls + HEDGE maker->taker variants are simulation-only; live order placement is not implemented."
     )
     await check_geoblock(settings)
 
@@ -55,6 +56,7 @@ async def run() -> None:
     engine = ArbitrageEngine(settings)
     taker = ShadowExecutor(settings, recorder)
     research = MakerResearchSuite(settings, recorder)
+    hedge = HedgeableResearchSuite(settings, recorder, research.regime)
     edge_tracker = EdgeTracker(recorder, settings.edge_record_min_interval_ms)
     diagnostics = LiveDiagnostics(settings.diagnostic_interval_seconds)
     stream = PolymarketMarketStream(settings.websocket_url)
@@ -63,6 +65,7 @@ async def run() -> None:
     def process_strategy_timers() -> None:
         taker.process_due(engine.books)
         research.process_due(engine)
+        hedge.process_due(engine)
 
     async def handle(message: dict) -> None:
         market_id = engine.apply_event(message)
@@ -83,13 +86,15 @@ async def run() -> None:
             exchange_timestamp=message.get("timestamp"),
         )
 
-        # All maker/hybrid variants receive the same external market event but
-        # maintain independent virtual queues, inventory and equity. They never
-        # trade with or fill one another.
+        # Phase 1.3 controls observe/update the shared SURGE tracker exactly once.
         research.on_market_update(engine, market_id)
+        surge = research.regime.current(market_id)
 
-        # Pure taker benchmark stays unchanged and only submits on the real LIVE
-        # window when its fee/depth/risk-adjusted opportunity clears thresholds.
+        # Phase 1.4 counterfactuals see the same external event and regime but
+        # have their own virtual queues, maker fills, hedge timers and equity.
+        hedge.on_market_update(engine, market_id, surge)
+
+        # Pure taker benchmark remains unchanged.
         if phase != MarketPhase.LIVE or not taker.can_submit(market_id):
             return
         opportunity = engine.evaluate(market_id)
@@ -105,7 +110,7 @@ async def run() -> None:
         while True:
             await asyncio.sleep(settings.diagnostic_interval_seconds)
             process_strategy_timers()
-            diagnostics.maybe_log(engine, taker, edge_tracker, research=research)
+            diagnostics.maybe_log(engine, taker, edge_tracker, research=research, hedge=hedge)
 
     timer_task = asyncio.create_task(timer_loop(), name="shadow-timers")
     diagnostic_task = asyncio.create_task(diagnostic_loop(), name="live-diagnostics")
@@ -143,8 +148,6 @@ async def run() -> None:
                 max(0, len(pairs) - len(stream_pairs)),
             )
 
-            # Give strategy engines one final chance to settle old-window state
-            # before token books are pruned during rollover.
             process_strategy_timers()
             engine.set_markets(stream_pairs)
             token_ids = [token for pair in stream_pairs for token in (pair.token_a, pair.token_b)]
@@ -165,8 +168,8 @@ async def run() -> None:
         await asyncio.gather(timer_task, diagnostic_task, return_exceptions=True)
 
     process_strategy_timers()
-    diagnostics.maybe_log(engine, taker, edge_tracker, research=research)
-    log.info("Finished Phase 1.3 shadow run | TAKER=%+.4f pUSD", float(taker.total_pnl))
+    diagnostics.maybe_log(engine, taker, edge_tracker, research=research, hedge=hedge)
+    log.info("Finished Phase 1.4 shadow run | TAKER=%+.4f pUSD", float(taker.total_pnl))
     for row in research.diagnostic_rows():
         log.info(
             "Finished %s | equity=%+.4f completed=%d inventory_exits=%d max_dd=%.4f",
@@ -174,6 +177,18 @@ async def run() -> None:
             float(row["equity"]),
             row["completed"],
             row["inventory_exits"],
+            float(row["max_drawdown"]),
+        )
+    for row in hedge.diagnostic_rows():
+        log.info(
+            "Finished %s | equity=%+.4f maker_fills=%d hedge=%d/%d recover_complete=%d recover_unwind=%d max_dd=%.4f",
+            row["strategy"],
+            float(row["equity"]),
+            row["maker_fills"],
+            row["hedge_successes"],
+            row["hedge_attempts"],
+            row["recovery_completions"],
+            row["recovery_unwinds"],
             float(row["max_drawdown"]),
         )
 

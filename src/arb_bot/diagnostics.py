@@ -42,7 +42,7 @@ class LiveDiagnostics:
     def due(self) -> bool:
         return time.monotonic() - self.last_log >= self.interval_seconds
 
-    def maybe_log(self, engine: ArbitrageEngine, taker, edge_tracker: EdgeTracker, *, research=None) -> None:
+    def maybe_log(self, engine: ArbitrageEngine, taker, edge_tracker: EdgeTracker, *, research=None, hedge=None) -> None:
         now = time.monotonic()
         if now - self.last_log < self.interval_seconds:
             return
@@ -127,6 +127,33 @@ class LiveDiagnostics:
                         row["surge_skips"],
                         float(row["max_drawdown"]),
                     )
+
+        if hedge is not None:
+            for row in hedge.diagnostic_rows():
+                log.info(
+                    "%s | eq=%+.4f pending=%d placed=%d maker_fills=%d cancelled=%d | hedge=%d/%d misses=%d recover_complete=%d recover_unwind=%d | avg_queue=%.1f avg_fill=%.0fms avg_hedge=%.1fms | MID=%d/%+.4f EXTREME=%d/%+.4f | surge_skips=%d no_quote=%d max_dd=%.4f",
+                    row["strategy"],
+                    float(row["equity"]),
+                    row["pending"],
+                    row["placed"],
+                    row["maker_fills"],
+                    row["cancelled"],
+                    row["hedge_successes"],
+                    row["hedge_attempts"],
+                    row["hedge_misses"],
+                    row["recovery_completions"],
+                    row["recovery_unwinds"],
+                    float(row["avg_queue"]),
+                    float(row["avg_fill_ms"]),
+                    float(row["avg_hedge_latency_ms"]),
+                    row["mid_events"],
+                    float(row["mid_pnl"]),
+                    row["extreme_events"],
+                    float(row["extreme_pnl"]),
+                    row["surge_skips"],
+                    row["no_hedgeable_quote"],
+                    float(row["max_drawdown"]),
+                )
 
         ordered = sorted(
             engine.pairs.items(),

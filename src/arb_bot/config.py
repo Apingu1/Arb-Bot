@@ -24,8 +24,12 @@ def _bool(name: str, default: bool) -> bool:
 
 def _decimal_tuple(name: str, default: str) -> tuple[Decimal, ...]:
     raw = _env(name, default)
-    values = [Decimal(part.strip()) for part in raw.split(",") if part.strip()]
-    return tuple(values)
+    return tuple(Decimal(part.strip()) for part in raw.split(",") if part.strip())
+
+
+def _int_tuple(name: str, default: str) -> tuple[int, ...]:
+    raw = _env(name, default)
+    return tuple(int(part.strip()) for part in raw.split(",") if part.strip())
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,9 +49,7 @@ class Settings:
     diagnostic_interval_seconds: int = field(default_factory=lambda: _int("DIAGNOSTIC_INTERVAL_SECONDS", 10))
     edge_record_min_interval_ms: int = field(default_factory=lambda: _int("EDGE_RECORD_MIN_INTERVAL_MS", 0))
 
-    # Phase 1.3 maker research. The old single MAKER/HYBRID classes remain in
-    # the repository as the Phase 1.2 checkpoint, but the live harness uses the
-    # queue-aware variant suite below.
+    # Phase 1.3 queue-aware maker benchmarks remain active as controls.
     maker_enabled: bool = field(default_factory=lambda: _bool("MAKER_SHADOW_ENABLED", True))
     maker_trade_shares: Decimal = field(default_factory=lambda: _decimal("MAKER_TRADE_SHARES", "5"))
     maker_variant_targets: tuple[Decimal, ...] = field(
@@ -55,8 +57,6 @@ class Settings:
     )
     maker_tick_size: Decimal = field(default_factory=lambda: _decimal("MAKER_TICK_SIZE", "0.01"))
     maker_min_gross_edge_per_share: Decimal = field(default_factory=lambda: _decimal("MAKER_MIN_GROSS_EDGE_PER_SHARE", "0.005"))
-    # Deprecated Phase 1.2 TTL retained for backwards-compatible tests / old
-    # simulator modules. Phase 1.3 does not chase/repost on this timer.
     maker_order_ttl_ms: int = field(default_factory=lambda: _int("MAKER_ORDER_TTL_MS", 1500))
     maker_max_quote_age_ms: int = field(default_factory=lambda: _int("MAKER_MAX_QUOTE_AGE_MS", 30000))
     maker_reprice_ticks: int = field(default_factory=lambda: _int("MAKER_REPRICE_TICKS", 2))
@@ -74,15 +74,39 @@ class Settings:
     hybrid_max_hold_loss_per_share: Decimal = field(default_factory=lambda: _decimal("HYBRID_MAX_HOLD_LOSS_PER_SHARE", "0.02"))
     hybrid_min_reprice_interval_ms: int = field(default_factory=lambda: _int("HYBRID_MIN_REPRICE_INTERVAL_MS", 500))
 
-    # SURGE / toxic-flow gate. A maker variant pauses new exposure when any
-    # configured short-horizon condition is met. Existing one-sided inventory
-    # is still actively managed rather than abandoned.
+    # Shared SURGE / toxic-flow gate.
     surge_move_1s: Decimal = field(default_factory=lambda: _decimal("SURGE_MOVE_1S", "0.04"))
     surge_move_3s: Decimal = field(default_factory=lambda: _decimal("SURGE_MOVE_3S", "0.08"))
     surge_updates_per_second: int = field(default_factory=lambda: _int("SURGE_UPDATES_PER_SECOND", 300))
     surge_pause_ms: int = field(default_factory=lambda: _int("SURGE_PAUSE_MS", 1500))
     surge_one_sided_window_seconds: int = field(default_factory=lambda: _int("SURGE_ONE_SIDED_WINDOW_SECONDS", 30))
     surge_one_sided_count: int = field(default_factory=lambda: _int("SURGE_ONE_SIDED_COUNT", 3))
+
+    # Phase 1.4 hedgeability-first maker -> taker research.
+    hedge_enabled: bool = field(default_factory=lambda: _bool("HEDGE_SHADOW_ENABLED", True))
+    hedge_net_edge_targets: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("HEDGE_NET_EDGE_TARGETS", "0.005,0.010,0.015,0.020")
+    )
+    hedge_completion_latencies_ms: tuple[int, ...] = field(
+        default_factory=lambda: _int_tuple("HEDGE_COMPLETION_LATENCIES_MS", "50,100,200")
+    )
+    hedge_size_candidates: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("HEDGE_SIZE_CANDIDATES", "5,10,20,50")
+    )
+    hedge_latency_reserve_per_share: Decimal = field(
+        default_factory=lambda: _decimal("HEDGE_LATENCY_RESERVE_PER_SHARE", "0.002")
+    )
+    hedge_min_expected_profit_usdc: Decimal = field(
+        default_factory=lambda: _decimal("HEDGE_MIN_EXPECTED_PROFIT_USDC", "0.10")
+    )
+    hedge_max_improve_ticks: int = field(default_factory=lambda: _int("HEDGE_MAX_IMPROVE_TICKS", 1))
+    hedge_max_quote_age_ms: int = field(default_factory=lambda: _int("HEDGE_MAX_QUOTE_AGE_MS", 30000))
+    hedge_requote_cooldown_ms: int = field(default_factory=lambda: _int("HEDGE_REQUOTE_COOLDOWN_MS", 500))
+    hedge_min_seconds_to_expiry: int = field(default_factory=lambda: _int("HEDGE_MIN_SECONDS_TO_EXPIRY", 30))
+    hedge_extreme_probability: Decimal = field(default_factory=lambda: _decimal("HEDGE_EXTREME_PROBABILITY", "0.10"))
+    hedge_taker_rebate_scenarios: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("HEDGE_TAKER_REBATE_SCENARIOS", "0,0.03,0.08,0.18,0.30,0.50")
+    )
 
     empirical_risk_min_samples: int = field(default_factory=lambda: _int("EMPIRICAL_RISK_MIN_SAMPLES", 20))
     use_empirical_risk_reserve: bool = field(default_factory=lambda: _bool("USE_EMPIRICAL_RISK_RESERVE", False))
