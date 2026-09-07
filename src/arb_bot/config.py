@@ -114,9 +114,6 @@ class Settings:
     hedge_ghost_max_active: int = field(default_factory=lambda: _int("HEDGE_GHOST_MAX_ACTIVE", 500))
 
     ev_frontier_enabled: bool = field(default_factory=lambda: _bool("EV_FRONTIER_ENABLED", True))
-    # Research-specific absolute-profit floor. This deliberately does NOT reuse
-    # HEDGE_MIN_EXPECTED_PROFIT_USDC, so 5/10/20/50 share variants are compared
-    # on the same per-share economics instead of different effective thresholds.
     ev_min_expected_profit_usdc: Decimal = field(
         default_factory=lambda: _decimal("EV_MIN_EXPECTED_PROFIT_USDC", "0.01")
     )
@@ -135,8 +132,7 @@ class Settings:
         default_factory=lambda: _decimal_tuple("EV_SIZE_CANDIDATES", "5,10,20,50")
     )
 
-    # Split-sell was strongly negative in Phase 1.5 and is disabled by default
-    # for the corrected run. It can still be explicitly re-enabled for history.
+    # Split-sell remains available only as a historical control.
     split_sell_enabled: bool = field(default_factory=lambda: _bool("SPLIT_SELL_ENABLED", False))
     split_sell_edge_targets: tuple[Decimal, ...] = field(
         default_factory=lambda: _decimal_tuple("SPLIT_SELL_EDGE_TARGETS", "0.005,0.010,0.015")
@@ -146,6 +142,50 @@ class Settings:
     split_sell_inventory_timeout_ms: int = field(default_factory=lambda: _int("SPLIT_SELL_INVENTORY_TIMEOUT_MS", 5000))
     split_sell_requote_cooldown_ms: int = field(default_factory=lambda: _int("SPLIT_SELL_REQUOTE_COOLDOWN_MS", 500))
     split_sell_min_seconds_to_expiry: int = field(default_factory=lambda: _int("SPLIT_SELL_MIN_SECONDS_TO_EXPIRY", 30))
+
+    # Phase 1.6: non-directional dual-FOK execution frontier.
+    # The first and second individual FOKs are simulated independently; no
+    # cross-order atomicity is assumed. Net edge is measured after taker fees.
+    dual_fok_enabled: bool = field(default_factory=lambda: _bool("DUAL_FOK_ENABLED", True))
+    dual_fok_base_latency_ms: int = field(default_factory=lambda: _int("DUAL_FOK_BASE_LATENCY_MS", 25))
+    dual_fok_recovery_latency_ms: int = field(default_factory=lambda: _int("DUAL_FOK_RECOVERY_LATENCY_MS", 50))
+    dual_fok_cooldown_ms: int = field(default_factory=lambda: _int("DUAL_FOK_COOLDOWN_MS", 1000))
+    dual_fok_max_book_age_ms: int = field(default_factory=lambda: _int("DUAL_FOK_MAX_BOOK_AGE_MS", 250))
+    dual_fok_use_surge_gate: bool = field(default_factory=lambda: _bool("DUAL_FOK_USE_SURGE_GATE", True))
+    dual_fok_leg_order: str = field(default_factory=lambda: _env("DUAL_FOK_LEG_ORDER", "fragile_first"))
+
+    dual_fok_primary_size: Decimal = field(default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_SIZE", "5"))
+    dual_fok_primary_edge_target: Decimal = field(
+        default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_EDGE_TARGET", "0.005")
+    )
+    dual_fok_primary_skew_ms: int = field(default_factory=lambda: _int("DUAL_FOK_PRIMARY_SKEW_MS", 25))
+    dual_fok_primary_coverage_multiple: Decimal = field(
+        default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_COVERAGE_MULTIPLE", "2")
+    )
+    dual_fok_primary_stability_ms: int = field(default_factory=lambda: _int("DUAL_FOK_PRIMARY_STABILITY_MS", 50))
+
+    dual_fok_skews_ms: tuple[int, ...] = field(
+        default_factory=lambda: _int_tuple("DUAL_FOK_SKEWS_MS", "0,10,25,50,100,200")
+    )
+    dual_fok_size_candidates: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("DUAL_FOK_SIZE_CANDIDATES", "1,5,10,20")
+    )
+    dual_fok_edge_targets: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("DUAL_FOK_EDGE_TARGETS", "0.005,0.010,0.015,0.020,0.030")
+    )
+    dual_fok_coverage_multiples: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("DUAL_FOK_COVERAGE_MULTIPLES", "1,2,5")
+    )
+    dual_fok_stability_periods_ms: tuple[int, ...] = field(
+        default_factory=lambda: _int_tuple("DUAL_FOK_STABILITY_PERIODS_MS", "0,25,50,100,250")
+    )
+
+    # Reverse complete-set research assumes the UP+DOWN inventory already exists
+    # before the opportunity, avoiding any hidden on-chain split latency.
+    reverse_dual_fok_enabled: bool = field(default_factory=lambda: _bool("REVERSE_DUAL_FOK_ENABLED", True))
+    reverse_dual_fok_skews_ms: tuple[int, ...] = field(
+        default_factory=lambda: _int_tuple("REVERSE_DUAL_FOK_SKEWS_MS", "0,25,50")
+    )
 
     empirical_risk_min_samples: int = field(default_factory=lambda: _int("EMPIRICAL_RISK_MIN_SAMPLES", 20))
     use_empirical_risk_reserve: bool = field(default_factory=lambda: _bool("USE_EMPIRICAL_RISK_RESERVE", False))
