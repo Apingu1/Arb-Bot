@@ -55,6 +55,9 @@ class Settings:
     )
     maker_tick_size: Decimal = field(default_factory=lambda: _decimal("MAKER_TICK_SIZE", "0.01"))
     maker_min_gross_edge_per_share: Decimal = field(default_factory=lambda: _decimal("MAKER_MIN_GROSS_EDGE_PER_SHARE", "0.005"))
+    # Deprecated Phase 1.2 TTL retained for backwards-compatible tests / old
+    # simulator modules. Phase 1.3 does not chase/repost on this timer.
+    maker_order_ttl_ms: int = field(default_factory=lambda: _int("MAKER_ORDER_TTL_MS", 1500))
     maker_max_quote_age_ms: int = field(default_factory=lambda: _int("MAKER_MAX_QUOTE_AGE_MS", 30000))
     maker_reprice_ticks: int = field(default_factory=lambda: _int("MAKER_REPRICE_TICKS", 2))
     maker_requote_cooldown_ms: int = field(default_factory=lambda: _int("MAKER_REQUOTE_COOLDOWN_MS", 500))
