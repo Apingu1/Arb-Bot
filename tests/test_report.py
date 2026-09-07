@@ -65,3 +65,81 @@ def test_report_aggregates_three_strategy_summaries_and_writes_csv(tmp_path):
     assert "ONE_LEG_MISS" in text
     assert "BOTH_MAKER_FILLED" in text
     assert "MAKER_PLUS_TAKER_COMPLETED" in text
+
+
+def test_report_falls_back_to_phase1_legacy_shadow_results(tmp_path):
+    path = tmp_path / "phase1.jsonl"
+    rows = [
+        {
+            "event_type": "shadow_result",
+            "payload": {
+                "market_id": "m1",
+                "slug": "s1",
+                "status": "ONE_LEG_MISS",
+                "shares": "5",
+                "pnl_usdc": "-1.25",
+                "action": "UNWIND_FILLED_LEG",
+                "leg_a_filled": True,
+                "leg_b_filled": False,
+                "details": "legacy",
+            },
+        },
+        {
+            "event_type": "shadow_result",
+            "payload": {
+                "market_id": "m2",
+                "slug": "s2",
+                "status": "NEITHER_FILLED",
+                "shares": "5",
+                "pnl_usdc": "0",
+                "action": "NO_POSITION",
+                "leg_a_filled": False,
+                "leg_b_filled": False,
+                "details": "legacy",
+            },
+        },
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    summary, executions = build_report(path)
+
+    assert summary["TAKER"]["events"] == 2
+    assert summary["TAKER"]["losses"] == 1
+    assert summary["TAKER"]["flats"] == 1
+    assert summary["TAKER"]["pnl"] == Decimal("-1.25")
+    assert executions[-1]["equity_after"] == Decimal("-1.25")
+
+
+def test_report_does_not_double_count_legacy_shadow_result_in_phase12_file(tmp_path):
+    path = tmp_path / "phase12.jsonl"
+    rows = [
+        {
+            "event_type": "shadow_result",
+            "payload": {
+                "slug": "s1",
+                "status": "ONE_LEG_MISS",
+                "shares": "5",
+                "pnl_usdc": "-1.25",
+                "action": "UNWIND_FILLED_LEG",
+            },
+        },
+        {
+            "event_type": "taker_execution_summary",
+            "payload": {
+                "strategy": "TAKER",
+                "slug": "s1",
+                "status": "ONE_LEG_MISS",
+                "action": "UNWIND_FILLED_LEG",
+                "shares": "5",
+                "realized_pnl": "-1.25",
+                "equity_after": "-1.25",
+            },
+        },
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    summary, executions = build_report(path)
+
+    assert summary["TAKER"]["events"] == 1
+    assert summary["TAKER"]["pnl"] == Decimal("-1.25")
+    assert len(executions) == 1
