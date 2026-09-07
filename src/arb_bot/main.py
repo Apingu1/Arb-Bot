@@ -12,8 +12,7 @@ from .config import Settings
 from .diagnostics import LiveDiagnostics
 from .discovery import MarketPhase, MarketDiscovery, market_phase, select_live_and_next_pairs
 from .edge_tracker import EdgeTracker
-from .hybrid_shadow import HybridShadowEngine
-from .maker_shadow import MakerShadowEngine
+from .maker_research import MakerResearchSuite
 from .polymarket_ws import PolymarketMarketStream
 from .simulator import ShadowExecutor
 from .storage import JsonlRecorder
@@ -47,7 +46,7 @@ async def run() -> None:
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
     log.warning(
-        "PHASE 1.2 MULTI-STRATEGY SHADOW MODE: TAKER/MAKER/HYBRID are simulation-only; live order placement is not implemented."
+        "PHASE 1.3 QUEUE-AWARE SHADOW MODE: TAKER + MAKER/HYBRID 99/98/97/96 variants are simulation-only; live order placement is not implemented."
     )
     await check_geoblock(settings)
 
@@ -55,8 +54,7 @@ async def run() -> None:
     discovery = MarketDiscovery(settings.gamma_url, settings.market_query)
     engine = ArbitrageEngine(settings)
     taker = ShadowExecutor(settings, recorder)
-    maker = MakerShadowEngine(settings, recorder)
-    hybrid = HybridShadowEngine(settings, recorder)
+    research = MakerResearchSuite(settings, recorder)
     edge_tracker = EdgeTracker(recorder, settings.edge_record_min_interval_ms)
     diagnostics = LiveDiagnostics(settings.diagnostic_interval_seconds)
     stream = PolymarketMarketStream(settings.websocket_url)
@@ -64,8 +62,7 @@ async def run() -> None:
 
     def process_strategy_timers() -> None:
         taker.process_due(engine.books)
-        maker.process_due(engine)
-        hybrid.process_due(engine)
+        research.process_due(engine)
 
     async def handle(message: dict) -> None:
         market_id = engine.apply_event(message)
@@ -86,11 +83,13 @@ async def run() -> None:
             exchange_timestamp=message.get("timestamp"),
         )
 
-        # Maker and hybrid engines see the same exact post-update book state.
-        maker.on_market_update(engine, market_id)
-        hybrid.on_market_update(engine, market_id)
+        # All maker/hybrid variants receive the same external market event but
+        # maintain independent virtual queues, inventory and equity. They never
+        # trade with or fill one another.
+        research.on_market_update(engine, market_id)
 
-        # Pure taker intents remain restricted to the true current LIVE window.
+        # Pure taker benchmark stays unchanged and only submits on the real LIVE
+        # window when its fee/depth/risk-adjusted opportunity clears thresholds.
         if phase != MarketPhase.LIVE or not taker.can_submit(market_id):
             return
         opportunity = engine.evaluate(market_id)
@@ -98,9 +97,6 @@ async def run() -> None:
             taker.submit(opportunity)
 
     async def timer_loop() -> None:
-        # Independent high-frequency clock: execution/recovery timers should not
-        # depend on another WebSocket message arriving and should never wait for
-        # the 10-second diagnostic heartbeat.
         while True:
             await asyncio.sleep(0.01)
             process_strategy_timers()
@@ -109,7 +105,7 @@ async def run() -> None:
         while True:
             await asyncio.sleep(settings.diagnostic_interval_seconds)
             process_strategy_timers()
-            diagnostics.maybe_log(engine, taker, edge_tracker, maker, hybrid)
+            diagnostics.maybe_log(engine, taker, edge_tracker, research=research)
 
     timer_task = asyncio.create_task(timer_loop(), name="shadow-timers")
     diagnostic_task = asyncio.create_task(diagnostic_loop(), name="live-diagnostics")
@@ -148,7 +144,7 @@ async def run() -> None:
             )
 
             # Give strategy engines one final chance to settle old-window state
-            # before pruning token books during rollover.
+            # before token books are pruned during rollover.
             process_strategy_timers()
             engine.set_markets(stream_pairs)
             token_ids = [token for pair in stream_pairs for token in (pair.token_a, pair.token_b)]
@@ -169,13 +165,17 @@ async def run() -> None:
         await asyncio.gather(timer_task, diagnostic_task, return_exceptions=True)
 
     process_strategy_timers()
-    diagnostics.maybe_log(engine, taker, edge_tracker, maker, hybrid)
-    log.info(
-        "Finished shadow run | TAKER=%+.4f MAKER=%+.4f HYBRID=%+.4f pUSD",
-        float(taker.total_pnl),
-        float(maker.total_pnl),
-        float(hybrid.total_pnl),
-    )
+    diagnostics.maybe_log(engine, taker, edge_tracker, research=research)
+    log.info("Finished Phase 1.3 shadow run | TAKER=%+.4f pUSD", float(taker.total_pnl))
+    for row in research.diagnostic_rows():
+        log.info(
+            "Finished %s | equity=%+.4f completed=%d inventory_exits=%d max_dd=%.4f",
+            row["strategy"],
+            float(row["equity"]),
+            row["completed"],
+            row["inventory_exits"],
+            float(row["max_drawdown"]),
+        )
 
 
 def cli() -> None:
