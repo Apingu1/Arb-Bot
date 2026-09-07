@@ -94,8 +94,9 @@ def classify_btc_15m_slug(slug: str | None, now: datetime | None = None) -> Mark
     return MarketPhase.FUTURE
 
 
-# Backward-compatible helper name used by the edge tracker and older callers.
-def market_phase(slug: str | None, now: datetime | None = None) -> MarketPhase:
+def market_phase(pair_or_slug: MarketPair | str | None, now: datetime | None = None) -> MarketPhase:
+    """Compatibility helper accepting either a MarketPair or a slug string."""
+    slug = pair_or_slug.slug if isinstance(pair_or_slug, MarketPair) else pair_or_slug
     return classify_btc_15m_slug(slug, now)
 
 
@@ -115,7 +116,7 @@ def btc_15m_candidate_slugs(
 
 def select_live_and_next_pairs(pairs: list[MarketPair], now: datetime | None = None) -> list[MarketPair]:
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    selected = [p for p in pairs if classify_btc_15m_slug(p.slug, now) in {MarketPhase.LIVE, MarketPhase.NEXT}]
+    selected = [p for p in pairs if market_phase(p, now) in {MarketPhase.LIVE, MarketPhase.NEXT}]
     selected.sort(key=lambda p: btc_15m_window_from_slug(p.slug)[0] if btc_15m_window_from_slug(p.slug) else datetime.max.replace(tzinfo=timezone.utc))
     return selected
 
@@ -294,7 +295,7 @@ class MarketDiscovery:
                 )
 
         pairs.sort(key=lambda p: btc_15m_window_from_slug(p.slug)[0] if btc_15m_window_from_slug(p.slug) else (_parse_time(p.end_date) or datetime.max.replace(tzinfo=timezone.utc)))
-        phases = Counter(classify_btc_15m_slug(pair.slug, now).value for pair in pairs)
+        phases = Counter(market_phase(pair, now).value for pair in pairs)
         if not pairs or not ({MarketPhase.LIVE.value, MarketPhase.NEXT.value} & set(phases)):
             log.warning("Discovery rejection summary: %s", dict(rejected))
             log.warning("Discovery rejection by phase: %s", dict(phase_rejections))
@@ -308,9 +309,6 @@ class MarketDiscovery:
             direct_events = await self._discover_recurring_events(client, now)
             search_events = await self._search_events(client)
 
-        # Direct deterministic slug lookups are authoritative. Search is only a
-        # fallback and must never overwrite a fresher/more complete direct event
-        # with an optimized/truncated search representation of the same event.
         events_by_key: dict[str, dict[str, Any]] = {}
         for event in direct_events:
             key = str(event.get("id") or event.get("slug") or id(event))
@@ -320,7 +318,7 @@ class MarketDiscovery:
             events_by_key.setdefault(key, event)
 
         pairs = self._pairs_from_events(list(events_by_key.values()), now)
-        phases = Counter(classify_btc_15m_slug(pair.slug, now).value for pair in pairs)
+        phases = Counter(market_phase(pair, now).value for pair in pairs)
         log.info(
             "Discovered %d BTC Up/Down binary markets phases=%s (%d direct events, %d search events)",
             len(pairs),
