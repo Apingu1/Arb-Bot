@@ -2,9 +2,26 @@ from datetime import datetime, timezone
 
 from arb_bot.discovery import (
     MarketDiscovery,
+    MarketPhase,
     btc_15m_candidate_slugs,
     btc_15m_window_from_slug,
+    market_phase,
+    select_stream_pairs,
 )
+from arb_bot.models import MarketPair
+
+
+def _pair(slug: str) -> MarketPair:
+    return MarketPair(
+        market_id=slug,
+        condition_id=None,
+        slug=slug,
+        question="BTC Up or Down 15m",
+        outcome_a="Up",
+        outcome_b="Down",
+        token_a=f"{slug}-up",
+        token_b=f"{slug}-down",
+    )
 
 
 def test_btc_15m_candidate_slugs_are_aligned_to_current_window():
@@ -22,6 +39,25 @@ def test_btc_15m_window_is_derived_from_slug_timestamp():
     start, end = btc_15m_window_from_slug("btc-updown-15m-1788759900")
     assert start == datetime(2026, 9, 7, 5, 45, tzinfo=timezone.utc)
     assert end == datetime(2026, 9, 7, 6, 0, tzinfo=timezone.utc)
+
+
+def test_market_phase_classifies_live_next_future_and_expired():
+    now = datetime(2026, 9, 7, 5, 43, tzinfo=timezone.utc)
+    assert market_phase(_pair("btc-updown-15m-1788758100"), now) == MarketPhase.EXPIRED
+    assert market_phase(_pair("btc-updown-15m-1788759000"), now) == MarketPhase.LIVE
+    assert market_phase(_pair("btc-updown-15m-1788759900"), now) == MarketPhase.NEXT
+    assert market_phase(_pair("btc-updown-15m-1788760800"), now) == MarketPhase.FUTURE
+
+
+def test_stream_selection_keeps_only_live_and_next():
+    now = datetime(2026, 9, 7, 5, 43, tzinfo=timezone.utc)
+    live = _pair("btc-updown-15m-1788759000")
+    next_pair = _pair("btc-updown-15m-1788759900")
+    future = _pair("btc-updown-15m-1788760800")
+
+    selected = select_stream_pairs([future, next_pair, live], now)
+
+    assert [pair.slug for pair in selected] == [live.slug, next_pair.slug]
 
 
 def test_current_gamma_event_shape_produces_binary_market_pair():
@@ -62,6 +98,35 @@ def test_current_gamma_event_shape_produces_binary_market_pair():
     assert pairs[0].outcome_b == "Down"
 
 
+def test_recurring_live_window_ignores_lagging_gamma_status_flags():
+    now = datetime(2026, 9, 7, 5, 43, tzinfo=timezone.utc)
+    discovery = MarketDiscovery("https://gamma-api.polymarket.com", "BTC Up or Down 15m")
+    events = [
+        {
+            "id": "event-live",
+            "slug": "btc-updown-15m-1788759000",
+            "title": "BTC Up or Down 15m",
+            "markets": [
+                {
+                    "id": "market-live",
+                    "slug": "btc-updown-15m-1788759000",
+                    "question": "Bitcoin Up or Down",
+                    "active": False,
+                    "closed": True,
+                    "enableOrderBook": False,
+                    "outcomes": '["Up", "Down"]',
+                    "clobTokenIds": '["live-up", "live-down"]',
+                }
+            ],
+        }
+    ]
+
+    pairs = discovery._pairs_from_events(events, now)
+
+    assert len(pairs) == 1
+    assert market_phase(pairs[0], now) == MarketPhase.LIVE
+
+
 def test_date_only_gamma_end_date_does_not_expire_live_15m_market():
     now = datetime(2026, 9, 7, 5, 51, tzinfo=timezone.utc)
     discovery = MarketDiscovery("https://gamma-api.polymarket.com", "BTC Up or Down 15m")
@@ -72,8 +137,6 @@ def test_date_only_gamma_end_date_does_not_expire_live_15m_market():
             "title": "BTC Up or Down 15m",
             "active": True,
             "closed": False,
-            # This date-only/day-level value was the source of the live bug:
-            # parsing it as midnight makes a 05:45-06:00 market look expired.
             "endDate": "2026-09-07T00:00:00Z",
             "markets": [
                 {
