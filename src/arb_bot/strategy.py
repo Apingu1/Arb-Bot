@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from .config import Settings
@@ -46,6 +47,17 @@ class ArbitrageEngine:
                     continue
                 book.apply_change(str(change.get("side") or ""), str(change.get("price") or "0"), str(change.get("size") or "0"), timestamp)
                 touched_market = self.token_to_pair.get(token) or touched_market
+        elif event_type == "last_trade_price":
+            token = str(event.get("asset_id") or "")
+            book = self.books.get(token)
+            if book and event.get("price") is not None:
+                book.apply_trade(
+                    str(event.get("price")),
+                    None if event.get("size") is None else str(event.get("size")),
+                    str(event.get("side") or ""),
+                    timestamp,
+                )
+                touched_market = self.token_to_pair.get(token)
         return touched_market
 
     def evaluate(self, market_id: str) -> Opportunity | None:
@@ -65,6 +77,9 @@ class ArbitrageEngine:
         candidates.add(self.settings.min_trade_shares)
         candidates.add(self.settings.max_trade_shares)
         best: Opportunity | None = None
+        detected_at_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        best_ask_a = a.best_ask()
+        best_ask_b = b.best_ask()
         for shares in sorted(candidates):
             if shares < self.settings.min_trade_shares or shares > self.settings.max_trade_shares:
                 continue
@@ -98,6 +113,9 @@ class ArbitrageEngine:
                 expected_net_profit=expected,
                 expected_net_edge_per_share=edge,
                 detected_monotonic=now,
+                detected_at_utc=detected_at_utc,
+                detected_best_ask_a=best_ask_a,
+                detected_best_ask_b=best_ask_b,
             )
             if best is None or opportunity.expected_net_profit > best.expected_net_profit:
                 best = opportunity
