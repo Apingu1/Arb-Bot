@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -34,6 +35,23 @@ def _listish(value: Any) -> list[str]:
     return []
 
 
+def _token_outcomes(market: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Read Gamma token/outcome fields with a CLOB-style nested fallback."""
+    tokens = _listish(market.get("clobTokenIds"))
+    outcomes = _listish(market.get("outcomes"))
+    if len(tokens) == 2 and len(outcomes) == 2:
+        return tokens, outcomes
+
+    nested = market.get("tokens")
+    if isinstance(nested, list) and len(nested) == 2 and all(isinstance(item, dict) for item in nested):
+        nested_tokens = [str(item.get("token_id") or item.get("tokenId") or item.get("id") or "") for item in nested]
+        nested_outcomes = [str(item.get("outcome") or item.get("name") or "") for item in nested]
+        if all(nested_tokens) and all(nested_outcomes):
+            return nested_tokens, nested_outcomes
+
+    return tokens, outcomes
+
+
 def _parse_time(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -47,7 +65,7 @@ def btc_15m_window_from_slug(slug: str | None) -> tuple[datetime, datetime] | No
     """Return the exact UTC start/end window encoded by a recurring BTC slug.
 
     Gamma's event/market ``endDate`` fields for this recurring series can be
-    calendar-day values rather than the exact 15-minute close timestamp.  The
+    calendar-day values rather than the exact 15-minute close timestamp. The
     slug timestamp is therefore the authoritative clock for this series.
     """
     if not slug:
@@ -65,13 +83,7 @@ def btc_15m_candidate_slugs(
     lookback_intervals: int = 1,
     lookahead_intervals: int = 8,
 ) -> list[str]:
-    """Return recurring BTC 15-minute event slugs around the current window.
-
-    Polymarket's recurring BTC 15m events use the UTC Unix timestamp of the
-    interval start in the slug, for example ``btc-updown-15m-1788753600``.
-    Looking slightly behind and ahead makes discovery robust during rollovers
-    and lets the websocket subscribe before the next interval begins.
-    """
+    """Return recurring BTC 15-minute event slugs around the current window."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     anchor = (int(now.timestamp()) // BTC_15M_INTERVAL_SECONDS) * BTC_15M_INTERVAL_SECONDS
     return [
@@ -105,10 +117,6 @@ class MarketDiscovery:
         return events
 
     async def _search_events(self, client: httpx.AsyncClient) -> list[dict[str, Any]]:
-        # Keep search as a fallback/secondary source. The recurring series is
-        # titled "BTC Up or Down 15m", which is more reliable than the older
-        # generic "Bitcoin Up or Down" query, but direct slug lookup remains
-        # the primary discovery method.
         queries = []
         for query in ("BTC Up or Down 15m", self.query):
             if query and query not in queries:
@@ -141,54 +149,92 @@ class MarketDiscovery:
     def _pairs_from_events(self, events: list[dict[str, Any]], now: datetime) -> list[MarketPair]:
         pairs: list[MarketPair] = []
         seen_market_ids: set[str] = set()
+        rejected: Counter[str] = Counter()
+        diagnostic_sample: dict[str, Any] | None = None
 
         for event in events:
             event_text = " ".join(
                 str(event.get(k) or "") for k in ("title", "slug", "ticker", "description")
             ).lower()
             if "bitcoin" not in event_text and "btc" not in event_text:
+                rejected["non_btc_event"] += 1
                 continue
 
             event_slug = str(event.get("slug") or "")
             event_window = btc_15m_window_from_slug(event_slug)
+            raw_markets = event.get("markets")
+            markets = raw_markets if isinstance(raw_markets, list) else []
+            if not markets and (event.get("clobTokenIds") or event.get("tokens")):
+                markets = [event]
+            if not markets:
+                rejected["event_without_markets"] += 1
+                continue
 
-            for market in event.get("markets") or []:
+            for market in markets:
                 if not isinstance(market, dict):
+                    rejected["invalid_market_shape"] += 1
                     continue
-                if market.get("closed") is True or market.get("active") is False:
+
+                if diagnostic_sample is None:
+                    raw_tokens = market.get("clobTokenIds")
+                    raw_outcomes = market.get("outcomes")
+                    diagnostic_sample = {
+                        "event_slug": event_slug,
+                        "market_slug": market.get("slug"),
+                        "active": market.get("active"),
+                        "closed": market.get("closed"),
+                        "enableOrderBook": market.get("enableOrderBook"),
+                        "acceptingOrders": market.get("acceptingOrders"),
+                        "endDate": market.get("endDate"),
+                        "endDateIso": market.get("endDateIso"),
+                        "clobTokenIds_type": type(raw_tokens).__name__,
+                        "clobTokenIds_present": bool(raw_tokens),
+                        "outcomes_type": type(raw_outcomes).__name__,
+                        "outcomes": raw_outcomes,
+                    }
+
+                if market.get("closed") is True:
+                    rejected["closed"] += 1
+                    continue
+                if market.get("active") is False:
+                    rejected["inactive"] += 1
                     continue
                 if market.get("enableOrderBook") is False:
+                    rejected["orderbook_disabled"] += 1
                     continue
 
-                tokens = _listish(market.get("clobTokenIds"))
-                outcomes = _listish(market.get("outcomes"))
-                if len(tokens) != 2 or len(outcomes) != 2:
+                tokens, outcomes = _token_outcomes(market)
+                if len(tokens) != 2:
+                    rejected["missing_tokens"] += 1
+                    continue
+                if len(outcomes) != 2:
+                    rejected["missing_outcomes"] += 1
                     continue
 
                 question = str(market.get("question") or event.get("title") or "")
                 slug = str(market.get("slug") or event_slug or market.get("id") or "unknown")
                 market_text = f"{question} {slug} {event.get('title') or ''}".lower()
                 if "up" not in market_text or "down" not in market_text:
+                    rejected["not_up_down"] += 1
                     continue
 
-                # For recurring BTC 15m markets, derive the exact interval from
-                # the slug. Gamma can expose a date-only endDate for the event,
-                # which parses as midnight UTC and would incorrectly discard
-                # every later market on the same calendar day.
                 recurring_window = btc_15m_window_from_slug(slug) or event_window
                 if recurring_window:
                     _, exact_end = recurring_window
                     if exact_end <= now:
+                        rejected["expired"] += 1
                         continue
                     end_date = exact_end.isoformat().replace("+00:00", "Z")
                 else:
                     end_date = market.get("endDateIso") or market.get("endDate") or event.get("endDate")
                     parsed_end = _parse_time(end_date)
                     if parsed_end and parsed_end <= now:
+                        rejected["expired"] += 1
                         continue
 
                 market_id = str(market.get("id") or market.get("conditionId") or slug)
                 if market_id in seen_market_ids:
+                    rejected["duplicate"] += 1
                     continue
                 seen_market_ids.add(market_id)
 
@@ -207,6 +253,10 @@ class MarketDiscovery:
                 )
 
         pairs.sort(key=lambda p: _parse_time(p.end_date) or datetime.max.replace(tzinfo=timezone.utc))
+        if not pairs and rejected:
+            log.warning("Discovery rejection summary: %s", dict(rejected))
+            if diagnostic_sample:
+                log.warning("Discovery sample market fields: %s", diagnostic_sample)
         return pairs
 
     async def discover(self) -> list[MarketPair]:
@@ -215,7 +265,6 @@ class MarketDiscovery:
             direct_events = await self._discover_recurring_events(client, now)
             search_events = await self._search_events(client)
 
-        # Deduplicate the same event when it is found by both mechanisms.
         events_by_key: dict[str, dict[str, Any]] = {}
         for event in [*direct_events, *search_events]:
             key = str(event.get("id") or event.get("slug") or id(event))
