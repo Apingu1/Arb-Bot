@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -15,6 +16,7 @@ log = logging.getLogger(__name__)
 
 BTC_15M_SLUG_PREFIX = "btc-updown-15m"
 BTC_15M_INTERVAL_SECONDS = 15 * 60
+BTC_15M_SLUG_RE = re.compile(r"^btc-updown-15m-(\d+)$")
 
 
 def _listish(value: Any) -> list[str]:
@@ -39,6 +41,22 @@ def _parse_time(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
     except ValueError:
         return None
+
+
+def btc_15m_window_from_slug(slug: str | None) -> tuple[datetime, datetime] | None:
+    """Return the exact UTC start/end window encoded by a recurring BTC slug.
+
+    Gamma's event/market ``endDate`` fields for this recurring series can be
+    calendar-day values rather than the exact 15-minute close timestamp.  The
+    slug timestamp is therefore the authoritative clock for this series.
+    """
+    if not slug:
+        return None
+    match = BTC_15M_SLUG_RE.fullmatch(str(slug))
+    if not match:
+        return None
+    start = datetime.fromtimestamp(int(match.group(1)), tz=timezone.utc)
+    return start, start + timedelta(seconds=BTC_15M_INTERVAL_SECONDS)
 
 
 def btc_15m_candidate_slugs(
@@ -131,6 +149,9 @@ class MarketDiscovery:
             if "bitcoin" not in event_text and "btc" not in event_text:
                 continue
 
+            event_slug = str(event.get("slug") or "")
+            event_window = btc_15m_window_from_slug(event_slug)
+
             for market in event.get("markets") or []:
                 if not isinstance(market, dict):
                     continue
@@ -144,16 +165,27 @@ class MarketDiscovery:
                 if len(tokens) != 2 or len(outcomes) != 2:
                     continue
 
-                end_date = market.get("endDateIso") or market.get("endDate") or event.get("endDate")
-                parsed_end = _parse_time(end_date)
-                if parsed_end and parsed_end <= now:
-                    continue
-
                 question = str(market.get("question") or event.get("title") or "")
-                slug = str(market.get("slug") or event.get("slug") or market.get("id") or "unknown")
+                slug = str(market.get("slug") or event_slug or market.get("id") or "unknown")
                 market_text = f"{question} {slug} {event.get('title') or ''}".lower()
                 if "up" not in market_text or "down" not in market_text:
                     continue
+
+                # For recurring BTC 15m markets, derive the exact interval from
+                # the slug. Gamma can expose a date-only endDate for the event,
+                # which parses as midnight UTC and would incorrectly discard
+                # every later market on the same calendar day.
+                recurring_window = btc_15m_window_from_slug(slug) or event_window
+                if recurring_window:
+                    _, exact_end = recurring_window
+                    if exact_end <= now:
+                        continue
+                    end_date = exact_end.isoformat().replace("+00:00", "Z")
+                else:
+                    end_date = market.get("endDateIso") or market.get("endDate") or event.get("endDate")
+                    parsed_end = _parse_time(end_date)
+                    if parsed_end and parsed_end <= now:
+                        continue
 
                 market_id = str(market.get("id") or market.get("conditionId") or slug)
                 if market_id in seen_market_ids:
