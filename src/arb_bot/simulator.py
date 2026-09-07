@@ -44,6 +44,7 @@ class PendingShadowOrder:
     submitted_at: float
     submitted_at_utc: str
     execute_at: float
+    execution_payload: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -177,6 +178,14 @@ class ShadowExecutor:
         actual_latency_ms = Decimal(str((now - opp.detected_monotonic) * 1000))
         execution_at_utc = _utc_now()
 
+        execution_payload = {
+            "execution_at": execution_at_utc,
+            "configured_latency_ms": self.settings.shadow_latency_ms,
+            "actual_latency_ms": actual_latency_ms,
+            "leg_a": _quote_payload(fill_a),
+            "leg_b": _quote_payload(fill_b),
+        }
+        pending.execution_payload = execution_payload
         self.recorder.write(
             "taker_execution_stage",
             {
@@ -185,11 +194,7 @@ class ShadowExecutor:
                 "market_id": opp.market_id,
                 "slug": opp.slug,
                 "shares": opp.shares,
-                "execution_at": execution_at_utc,
-                "configured_latency_ms": self.settings.shadow_latency_ms,
-                "actual_latency_ms": actual_latency_ms,
-                "leg_a": _quote_payload(fill_a),
-                "leg_b": _quote_payload(fill_b),
+                **execution_payload,
             },
         )
 
@@ -198,7 +203,8 @@ class ShadowExecutor:
                 fill_b.segments, self.settings.crypto_taker_fee_rate
             )
             pnl = opp.shares - fill_a.notional - fill_b.notional - fees
-            result = ShadowResult(
+            pending.execution_payload = {**execution_payload, "combined_taker_fees": fees}
+            return ShadowResult(
                 opp.market_id,
                 opp.slug,
                 "BOTH_FILLED",
@@ -209,19 +215,6 @@ class ShadowExecutor:
                 True,
                 "Both simulated FOK legs filled inside their detection-time price limits.",
             )
-            # Store the exact fills temporarily on the pending object via a summary event.
-            self.recorder.write(
-                "taker_fill_detail",
-                {
-                    "market_id": opp.market_id,
-                    "slug": opp.slug,
-                    "leg_a": _quote_payload(fill_a),
-                    "leg_b": _quote_payload(fill_b),
-                    "fees": fees,
-                    "actual_execution_latency_ms": actual_latency_ms,
-                },
-            )
-            return result
 
         if not fill_a and not fill_b:
             return ShadowResult(
@@ -255,10 +248,7 @@ class ShadowExecutor:
                 "slug": opp.slug,
                 "shares": opp.shares,
                 "filled_leg": filled_leg,
-                "execution_at": execution_at_utc,
-                "actual_execution_latency_ms": actual_latency_ms,
-                "leg_a": _quote_payload(fill_a),
-                "leg_b": _quote_payload(fill_b),
+                **execution_payload,
                 "configured_recovery_latency_ms": self.settings.shadow_recovery_latency_ms,
             },
         )
@@ -355,7 +345,10 @@ class ShadowExecutor:
             "residual_recovery_penalty": penalty,
             "final_pnl": pnl,
         }
-        self.recorder.write("taker_recovery_stage", {"strategy": self.strategy_name, "market_id": opp.market_id, "slug": opp.slug, **payload})
+        self.recorder.write(
+            "taker_recovery_stage",
+            {"strategy": self.strategy_name, "market_id": opp.market_id, "slug": opp.slug, **payload},
+        )
         return result, payload
 
     def _finalize(
@@ -387,11 +380,20 @@ class ShadowExecutor:
         )
         self.recorder.write("shadow_result", result)
 
-        actual_execution_latency_ms: Decimal | None = None
         if recovery is not None:
-            actual_execution_latency_ms = recovery.actual_execution_latency_ms
-        elif initial is not None:
-            actual_execution_latency_ms = Decimal(str((now - opp.detected_monotonic) * 1000))
+            actual_execution_latency_ms: Decimal | None = recovery.actual_execution_latency_ms
+            initial_execution = {
+                "execution_at": recovery.execution_at_utc,
+                "configured_latency_ms": self.settings.shadow_latency_ms,
+                "actual_latency_ms": recovery.actual_execution_latency_ms,
+                "leg_a": _quote_payload(recovery.fill_a),
+                "leg_b": _quote_payload(recovery.fill_b),
+            }
+        else:
+            actual_execution_latency_ms = (
+                Decimal(str((now - opp.detected_monotonic) * 1000)) if initial is not None else None
+            )
+            initial_execution = initial.execution_payload if initial is not None else None
 
         summary = {
             "strategy": self.strategy_name,
@@ -415,6 +417,7 @@ class ShadowExecutor:
             "detected_taker_fees": opp.taker_fees,
             "detected_risk_reserve": opp.risk_reserve,
             "detected_expected_net_profit": opp.expected_net_profit,
+            "initial_execution": initial_execution,
             "actual_execution_latency_ms": actual_execution_latency_ms,
             "configured_execution_latency_ms": self.settings.shadow_latency_ms,
             "configured_recovery_latency_ms": self.settings.shadow_recovery_latency_ms,
