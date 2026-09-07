@@ -12,7 +12,8 @@ from .config import Settings
 from .diagnostics import LiveDiagnostics
 from .discovery import MarketPhase, MarketDiscovery, market_phase, select_live_and_next_pairs
 from .edge_tracker import EdgeTracker
-from .ev_frontier import EVFrontierSuite, SplitSellResearchSuite
+from .ev_frontier import SplitSellResearchSuite
+from .ev_frontier_v151 import CorrectedEVFrontierSuite
 from .hedgeable_research import HedgeableResearchSuite
 from .maker_research import MakerResearchSuite
 from .polymarket_ws import PolymarketMarketStream
@@ -48,8 +49,15 @@ async def run() -> None:
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
     log.warning(
-        "PHASE 1.5 EV-FRONTIER SHADOW MODE: TAKER + MAKER/HYBRID + HEDGE controls + grace/size EV variants + SPLITSELL are simulation-only; live order placement is not implemented."
+        "PHASE 1.5.1 EV-EXPERIMENT-CORRECTION SHADOW MODE: TAKER + MAKER/HYBRID + HEDGE controls + corrected grace/size EV variants are simulation-only; live order placement is not implemented."
     )
+    log.info(
+        "EV research gate | edge-driven variants use EV_MIN_EXPECTED_PROFIT_USDC=%s independently of HEDGE_MIN_EXPECTED_PROFIT_USDC=%s",
+        settings.ev_min_expected_profit_usdc,
+        settings.hedge_min_expected_profit_usdc,
+    )
+    if not settings.split_sell_enabled:
+        log.info("SPLITSELL disabled for Phase 1.5.1 corrected run after strongly negative Phase 1.5 evidence")
     await check_geoblock(settings)
 
     recorder = JsonlRecorder(settings.output_path)
@@ -58,8 +66,8 @@ async def run() -> None:
     taker = ShadowExecutor(settings, recorder)
     research = MakerResearchSuite(settings, recorder)
     hedge = HedgeableResearchSuite(settings, recorder, research.regime)
-    frontier = EVFrontierSuite(settings, recorder, research.regime)
-    split_sell = SplitSellResearchSuite(settings, recorder, research.regime)
+    frontier = CorrectedEVFrontierSuite(settings, recorder, research.regime)
+    split_sell = SplitSellResearchSuite(settings, recorder, research.regime) if settings.split_sell_enabled else None
     edge_tracker = EdgeTracker(recorder, settings.edge_record_min_interval_ms)
     diagnostics = LiveDiagnostics(settings.diagnostic_interval_seconds)
     stream = PolymarketMarketStream(settings.websocket_url)
@@ -70,7 +78,8 @@ async def run() -> None:
         research.process_due(engine)
         hedge.process_due(engine)
         frontier.process_due(engine)
-        split_sell.process_due(engine)
+        if split_sell is not None:
+            split_sell.process_due(engine)
 
     async def handle(message: dict) -> None:
         market_id = engine.apply_event(message)
@@ -99,7 +108,8 @@ async def run() -> None:
         # but maintain independent virtual queues, inventory and equity.
         hedge.on_market_update(engine, market_id, surge)
         frontier.on_market_update(engine, market_id, surge)
-        split_sell.on_market_update(engine, market_id, surge)
+        if split_sell is not None:
+            split_sell.on_market_update(engine, market_id, surge)
 
         # Pure taker benchmark remains unchanged.
         if phase != MarketPhase.LIVE or not taker.can_submit(market_id):
@@ -192,7 +202,7 @@ async def run() -> None:
         frontier=frontier,
         split_sell=split_sell,
     )
-    log.info("Finished Phase 1.5 shadow run | TAKER=%+.4f pUSD", float(taker.total_pnl))
+    log.info("Finished Phase 1.5.1 shadow run | TAKER=%+.4f pUSD", float(taker.total_pnl))
     for row in research.diagnostic_rows():
         log.info(
             "Finished %s | equity=%+.4f completed=%d inventory_exits=%d max_dd=%.4f",
@@ -214,9 +224,12 @@ async def run() -> None:
             row["recovery_unwinds"],
             float(row["max_drawdown"]),
         )
-    for row in frontier.ranked_rows():
+    ranked = frontier.ranked_rows()
+    if not ranked:
+        log.info("EV FRONTIER FINAL | INSUFFICIENT DATA: no variant has a realized maker fill or ghost fill")
+    for row in ranked:
         log.info(
-            "Finished %s | eq=%+.4f p_fill=%.2f%% p_hedge=%.2f%% model_EV=%+.5f realized_EV=%+.5f ghost=%d/%d",
+            "Finished %s | eq=%+.4f p_fill=%.2f%% p_hedge=%.2f%% model_EV=%+.5f realized_EV=%+.5f ghost=%d/%d ghost_avg=%+.5f ghost_median=%+.5f ghost_best=%+.5f ghost_worst=%+.5f",
             row["strategy"],
             float(row["equity"]),
             float(row["p_fill"] * 100),
@@ -225,16 +238,21 @@ async def run() -> None:
             float(row["realized_ev_per_placement"]),
             row["ghost_filled"],
             row["ghost_created"],
+            float(row["ghost_avg_best_recovery_pnl"]),
+            float(row["ghost_median_best_recovery_pnl"]),
+            float(row["ghost_best_recovery_pnl"]),
+            float(row["ghost_worst_recovery_pnl"]),
         )
-    for row in split_sell.diagnostic_rows():
-        log.info(
-            "Finished %s | eq=%+.4f p_fill=%.2f%% p_complete=%.2f%% EV/placement=%+.5f",
-            row["strategy"],
-            float(row["equity"]),
-            float(row["p_fill"] * 100),
-            float(row["p_complete_given_fill"] * 100),
-            float(row["ev_per_placement"]),
-        )
+    if split_sell is not None:
+        for row in split_sell.diagnostic_rows():
+            log.info(
+                "Finished %s | eq=%+.4f p_fill=%.2f%% p_complete=%.2f%% EV/placement=%+.5f",
+                row["strategy"],
+                float(row["equity"]),
+                float(row["p_fill"] * 100),
+                float(row["p_complete_given_fill"] * 100),
+                float(row["ev_per_placement"]),
+            )
 
 
 def cli() -> None:
