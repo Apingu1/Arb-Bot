@@ -6,7 +6,7 @@ import logging
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 import httpx
@@ -21,12 +21,12 @@ BTC_15M_INTERVAL_SECONDS = 15 * 60
 BTC_15M_SLUG_RE = re.compile(r"^btc-updown-15m-(\d+)$")
 
 
-class MarketPhase(StrEnum):
+class MarketPhase(str, Enum):
     LIVE = "LIVE"
     NEXT = "NEXT"
     FUTURE = "FUTURE"
     EXPIRED = "EXPIRED"
-    UNKNOWN = "UNKNOWN"
+    OTHER = "OTHER"
 
 
 def _listish(value: Any) -> list[str]:
@@ -45,7 +45,6 @@ def _listish(value: Any) -> list[str]:
 
 
 def _token_outcomes(market: dict[str, Any]) -> tuple[list[str], list[str]]:
-    """Read Gamma token/outcome fields with a CLOB-style nested fallback."""
     tokens = _listish(market.get("clobTokenIds"))
     outcomes = _listish(market.get("outcomes"))
     if len(tokens) == 2 and len(outcomes) == 2:
@@ -71,7 +70,6 @@ def _parse_time(value: str | None) -> datetime | None:
 
 
 def btc_15m_window_from_slug(slug: str | None) -> tuple[datetime, datetime] | None:
-    """Return the exact UTC start/end window encoded by a recurring BTC slug."""
     if not slug:
         return None
     match = BTC_15M_SLUG_RE.fullmatch(str(slug))
@@ -81,40 +79,19 @@ def btc_15m_window_from_slug(slug: str | None) -> tuple[datetime, datetime] | No
     return start, start + timedelta(seconds=BTC_15M_INTERVAL_SECONDS)
 
 
-def market_phase(pair: MarketPair, now: datetime | None = None) -> MarketPhase:
-    """Classify a recurring BTC market relative to the current UTC 15m window."""
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    window = btc_15m_window_from_slug(pair.slug)
+def classify_btc_15m_slug(slug: str | None, now: datetime | None = None) -> MarketPhase:
+    window = btc_15m_window_from_slug(slug)
     if not window:
-        parsed_end = _parse_time(pair.end_date)
-        if parsed_end and parsed_end <= now:
-            return MarketPhase.EXPIRED
-        return MarketPhase.UNKNOWN
-
+        return MarketPhase.OTHER
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     start, end = window
-    if end <= now:
+    if now >= end:
         return MarketPhase.EXPIRED
     if start <= now < end:
         return MarketPhase.LIVE
-
-    current_anchor = (int(now.timestamp()) // BTC_15M_INTERVAL_SECONDS) * BTC_15M_INTERVAL_SECONDS
-    next_start = datetime.fromtimestamp(current_anchor + BTC_15M_INTERVAL_SECONDS, tz=timezone.utc)
-    if start == next_start:
+    if start - timedelta(seconds=BTC_15M_INTERVAL_SECONDS) <= now < start:
         return MarketPhase.NEXT
     return MarketPhase.FUTURE
-
-
-def select_stream_pairs(pairs: list[MarketPair], now: datetime | None = None) -> list[MarketPair]:
-    """Subscribe only to LIVE and immediately NEXT windows.
-
-    Keeping NEXT warm gives us a populated book at rollover, while excluding
-    distant pre-open books that otherwise dominate diagnostics with static
-    0.50-ish prices.
-    """
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    selected = [pair for pair in pairs if market_phase(pair, now) in {MarketPhase.LIVE, MarketPhase.NEXT}]
-    selected.sort(key=lambda pair: 0 if market_phase(pair, now) == MarketPhase.LIVE else 1)
-    return selected
 
 
 def btc_15m_candidate_slugs(
@@ -123,13 +100,19 @@ def btc_15m_candidate_slugs(
     lookback_intervals: int = 1,
     lookahead_intervals: int = 8,
 ) -> list[str]:
-    """Return recurring BTC 15-minute event slugs around the current window."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     anchor = (int(now.timestamp()) // BTC_15M_INTERVAL_SECONDS) * BTC_15M_INTERVAL_SECONDS
     return [
         f"{BTC_15M_SLUG_PREFIX}-{anchor + (offset * BTC_15M_INTERVAL_SECONDS)}"
         for offset in range(-lookback_intervals, lookahead_intervals + 1)
     ]
+
+
+def select_live_and_next_pairs(pairs: list[MarketPair], now: datetime | None = None) -> list[MarketPair]:
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    selected = [p for p in pairs if classify_btc_15m_slug(p.slug, now) in {MarketPhase.LIVE, MarketPhase.NEXT}]
+    selected.sort(key=lambda p: btc_15m_window_from_slug(p.slug)[0] if btc_15m_window_from_slug(p.slug) else datetime.max.replace(tzinfo=timezone.utc))
+    return selected
 
 
 class MarketDiscovery:
@@ -193,15 +176,14 @@ class MarketDiscovery:
         diagnostic_sample: dict[str, Any] | None = None
 
         for event in events:
-            event_text = " ".join(
-                str(event.get(k) or "") for k in ("title", "slug", "ticker", "description")
-            ).lower()
+            event_text = " ".join(str(event.get(k) or "") for k in ("title", "slug", "ticker", "description")).lower()
             if "bitcoin" not in event_text and "btc" not in event_text:
                 rejected["non_btc_event"] += 1
                 continue
 
             event_slug = str(event.get("slug") or "")
             event_window = btc_15m_window_from_slug(event_slug)
+            event_phase = classify_btc_15m_slug(event_slug, now) if event_window else MarketPhase.OTHER
             raw_markets = event.get("markets")
             markets = raw_markets if isinstance(raw_markets, list) else []
             if not markets and (event.get("clobTokenIds") or event.get("tokens")):
@@ -216,22 +198,42 @@ class MarketDiscovery:
                     continue
 
                 if diagnostic_sample is None:
-                    raw_tokens = market.get("clobTokenIds")
-                    raw_outcomes = market.get("outcomes")
                     diagnostic_sample = {
                         "event_slug": event_slug,
+                        "event_phase": event_phase.value,
                         "market_slug": market.get("slug"),
                         "active": market.get("active"),
                         "closed": market.get("closed"),
                         "enableOrderBook": market.get("enableOrderBook"),
                         "acceptingOrders": market.get("acceptingOrders"),
-                        "endDate": market.get("endDate"),
-                        "endDateIso": market.get("endDateIso"),
-                        "clobTokenIds_type": type(raw_tokens).__name__,
-                        "clobTokenIds_present": bool(raw_tokens),
-                        "outcomes_type": type(raw_outcomes).__name__,
-                        "outcomes": raw_outcomes,
+                        "clobTokenIds_present": bool(market.get("clobTokenIds")),
+                        "outcomes": market.get("outcomes"),
                     }
+
+                question = str(market.get("question") or event.get("title") or "")
+                slug = str(market.get("slug") or event_slug or market.get("id") or "unknown")
+                recurring_window = btc_15m_window_from_slug(slug) or event_window
+                recurring_phase = classify_btc_15m_slug(slug, now) if btc_15m_window_from_slug(slug) else event_phase
+
+                # For the deterministic BTC 15m recurring series, time encoded in
+                # the slug is authoritative. Gamma lifecycle flags may lag around
+                # the opening/closing boundary, so LIVE/NEXT recurring markets are
+                # allowed through even when those generic flags are stale.
+                if recurring_window:
+                    if recurring_phase is MarketPhase.EXPIRED:
+                        rejected["expired"] += 1
+                        continue
+                else:
+                    if market.get("closed") is True:
+                        rejected["closed"] += 1
+                        continue
+                    if market.get("active") is False:
+                        rejected["inactive"] += 1
+                        continue
+
+                if market.get("enableOrderBook") is False and recurring_phase not in {MarketPhase.LIVE, MarketPhase.NEXT}:
+                    rejected["orderbook_disabled"] += 1
+                    continue
 
                 tokens, outcomes = _token_outcomes(market)
                 if len(tokens) != 2:
@@ -241,34 +243,15 @@ class MarketDiscovery:
                     rejected["missing_outcomes"] += 1
                     continue
 
-                question = str(market.get("question") or event.get("title") or "")
-                slug = str(market.get("slug") or event_slug or market.get("id") or "unknown")
                 market_text = f"{question} {slug} {event.get('title') or ''}".lower()
                 if "up" not in market_text or "down" not in market_text:
                     rejected["not_up_down"] += 1
                     continue
 
-                recurring_window = btc_15m_window_from_slug(slug) or event_window
                 if recurring_window:
                     _, exact_end = recurring_window
-                    if exact_end <= now:
-                        rejected["expired"] += 1
-                        continue
                     end_date = exact_end.isoformat().replace("+00:00", "Z")
-                    # For this deterministic recurring series, the slug clock is
-                    # authoritative. Gamma status flags can lag the actual window
-                    # and previously caused the true current market to disappear
-                    # while distant pre-open markets survived.
                 else:
-                    if market.get("closed") is True:
-                        rejected["closed"] += 1
-                        continue
-                    if market.get("active") is False:
-                        rejected["inactive"] += 1
-                        continue
-                    if market.get("enableOrderBook") is False:
-                        rejected["orderbook_disabled"] += 1
-                        continue
                     end_date = market.get("endDateIso") or market.get("endDate") or event.get("endDate")
                     parsed_end = _parse_time(end_date)
                     if parsed_end and parsed_end <= now:
@@ -295,7 +278,7 @@ class MarketDiscovery:
                     )
                 )
 
-        pairs.sort(key=lambda p: _parse_time(p.end_date) or datetime.max.replace(tzinfo=timezone.utc))
+        pairs.sort(key=lambda p: btc_15m_window_from_slug(p.slug)[0] if btc_15m_window_from_slug(p.slug) else (_parse_time(p.end_date) or datetime.max.replace(tzinfo=timezone.utc)))
         if not pairs and rejected:
             log.warning("Discovery rejection summary: %s", dict(rejected))
             if diagnostic_sample:
@@ -314,11 +297,11 @@ class MarketDiscovery:
             events_by_key[key] = event
 
         pairs = self._pairs_from_events(list(events_by_key.values()), now)
-        phase_counts = Counter(market_phase(pair, now).value for pair in pairs)
+        phases = Counter(classify_btc_15m_slug(pair.slug, now).value for pair in pairs)
         log.info(
             "Discovered %d BTC Up/Down binary markets phases=%s (%d direct events, %d search events)",
             len(pairs),
-            dict(phase_counts),
+            dict(phases),
             len(direct_events),
             len(search_events),
         )
