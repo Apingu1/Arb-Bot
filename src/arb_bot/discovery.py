@@ -7,7 +7,7 @@ import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 
@@ -16,8 +16,10 @@ from .models import MarketPair
 
 log = logging.getLogger(__name__)
 
+UPDOWN_15M_INTERVAL_SECONDS = 15 * 60
+UPDOWN_15M_SLUG_RE = re.compile(r"^([a-z0-9]+)-updown-15m-(\d+)$")
 BTC_15M_SLUG_PREFIX = "btc-updown-15m"
-BTC_15M_INTERVAL_SECONDS = 15 * 60
+BTC_15M_INTERVAL_SECONDS = UPDOWN_15M_INTERVAL_SECONDS
 BTC_15M_SLUG_RE = re.compile(r"^btc-updown-15m-(\d+)$")
 
 
@@ -69,18 +71,25 @@ def _parse_time(value: str | None) -> datetime | None:
         return None
 
 
-def btc_15m_window_from_slug(slug: str | None) -> tuple[datetime, datetime] | None:
+def asset_from_slug(slug: str | None) -> str | None:
     if not slug:
         return None
-    match = BTC_15M_SLUG_RE.fullmatch(str(slug))
+    match = UPDOWN_15M_SLUG_RE.fullmatch(str(slug).lower())
+    return match.group(1).upper() if match else None
+
+
+def updown_15m_window_from_slug(slug: str | None) -> tuple[datetime, datetime] | None:
+    if not slug:
+        return None
+    match = UPDOWN_15M_SLUG_RE.fullmatch(str(slug).lower())
     if not match:
         return None
-    start = datetime.fromtimestamp(int(match.group(1)), tz=timezone.utc)
-    return start, start + timedelta(seconds=BTC_15M_INTERVAL_SECONDS)
+    start = datetime.fromtimestamp(int(match.group(2)), tz=timezone.utc)
+    return start, start + timedelta(seconds=UPDOWN_15M_INTERVAL_SECONDS)
 
 
-def classify_btc_15m_slug(slug: str | None, now: datetime | None = None) -> MarketPhase:
-    window = btc_15m_window_from_slug(slug)
+def classify_updown_15m_slug(slug: str | None, now: datetime | None = None) -> MarketPhase:
+    window = updown_15m_window_from_slug(slug)
     if not window:
         return MarketPhase.OTHER
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -89,15 +98,38 @@ def classify_btc_15m_slug(slug: str | None, now: datetime | None = None) -> Mark
         return MarketPhase.EXPIRED
     if start <= now < end:
         return MarketPhase.LIVE
-    if start - timedelta(seconds=BTC_15M_INTERVAL_SECONDS) <= now < start:
+    if start - timedelta(seconds=UPDOWN_15M_INTERVAL_SECONDS) <= now < start:
         return MarketPhase.NEXT
     return MarketPhase.FUTURE
 
 
-def market_phase(pair_or_slug: MarketPair | str | None, now: datetime | None = None) -> MarketPhase:
-    """Compatibility helper accepting either a MarketPair or a slug string."""
-    slug = pair_or_slug.slug if isinstance(pair_or_slug, MarketPair) else pair_or_slug
-    return classify_btc_15m_slug(slug, now)
+def updown_15m_candidate_slugs(
+    asset: str,
+    now: datetime | None = None,
+    *,
+    lookback_intervals: int = 1,
+    lookahead_intervals: int = 2,
+) -> list[str]:
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    anchor = (int(now.timestamp()) // UPDOWN_15M_INTERVAL_SECONDS) * UPDOWN_15M_INTERVAL_SECONDS
+    prefix = f"{asset.strip().lower()}-updown-15m"
+    return [
+        f"{prefix}-{anchor + (offset * UPDOWN_15M_INTERVAL_SECONDS)}"
+        for offset in range(-lookback_intervals, lookahead_intervals + 1)
+    ]
+
+
+# Backward-compatible BTC helpers retained for existing tests and consumers.
+def btc_15m_window_from_slug(slug: str | None) -> tuple[datetime, datetime] | None:
+    if asset_from_slug(slug) != "BTC":
+        return None
+    return updown_15m_window_from_slug(slug)
+
+
+def classify_btc_15m_slug(slug: str | None, now: datetime | None = None) -> MarketPhase:
+    if asset_from_slug(slug) != "BTC":
+        return MarketPhase.OTHER
+    return classify_updown_15m_slug(slug, now)
 
 
 def btc_15m_candidate_slugs(
@@ -106,25 +138,50 @@ def btc_15m_candidate_slugs(
     lookback_intervals: int = 1,
     lookahead_intervals: int = 8,
 ) -> list[str]:
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    anchor = (int(now.timestamp()) // BTC_15M_INTERVAL_SECONDS) * BTC_15M_INTERVAL_SECONDS
-    return [
-        f"{BTC_15M_SLUG_PREFIX}-{anchor + (offset * BTC_15M_INTERVAL_SECONDS)}"
-        for offset in range(-lookback_intervals, lookahead_intervals + 1)
-    ]
+    return updown_15m_candidate_slugs(
+        "BTC",
+        now,
+        lookback_intervals=lookback_intervals,
+        lookahead_intervals=lookahead_intervals,
+    )
+
+
+def market_phase(pair_or_slug: MarketPair | str | None, now: datetime | None = None) -> MarketPhase:
+    """Classify any recurring <asset>-updown-15m market."""
+    slug = pair_or_slug.slug if isinstance(pair_or_slug, MarketPair) else pair_or_slug
+    return classify_updown_15m_slug(slug, now)
 
 
 def select_live_and_next_pairs(pairs: list[MarketPair], now: datetime | None = None) -> list[MarketPair]:
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     selected = [p for p in pairs if market_phase(p, now) in {MarketPhase.LIVE, MarketPhase.NEXT}]
-    selected.sort(key=lambda p: btc_15m_window_from_slug(p.slug)[0] if btc_15m_window_from_slug(p.slug) else datetime.max.replace(tzinfo=timezone.utc))
+    selected.sort(
+        key=lambda p: (
+            asset_from_slug(p.slug) or "ZZZ",
+            updown_15m_window_from_slug(p.slug)[0]
+            if updown_15m_window_from_slug(p.slug)
+            else datetime.max.replace(tzinfo=timezone.utc),
+        )
+    )
     return selected
 
 
 class MarketDiscovery:
-    def __init__(self, base_url: str, query: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        query: str,
+        assets: Iterable[str] | None = None,
+        *,
+        lookahead_intervals: int = 2,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.query = query
+        normalized = tuple(dict.fromkeys(str(asset).strip().upper() for asset in (assets or ("BTC",)) if str(asset).strip()))
+        self.assets = normalized or ("BTC",)
+        self.asset_set = set(self.assets)
+        self.asset_order = {asset: index for index, asset in enumerate(self.assets)}
+        self.lookahead_intervals = max(1, int(lookahead_intervals))
 
     async def _fetch_event_by_slug(self, client: httpx.AsyncClient, slug: str) -> dict[str, Any] | None:
         try:
@@ -139,17 +196,35 @@ class MarketDiscovery:
             return None
 
     async def _discover_recurring_events(self, client: httpx.AsyncClient, now: datetime) -> list[dict[str, Any]]:
-        slugs = btc_15m_candidate_slugs(now)
+        slugs = [
+            slug
+            for asset in self.assets
+            for slug in updown_15m_candidate_slugs(
+                asset,
+                now,
+                lookback_intervals=1,
+                lookahead_intervals=self.lookahead_intervals,
+            )
+        ]
         results = await asyncio.gather(*(self._fetch_event_by_slug(client, slug) for slug in slugs))
         events = [event for event in results if event]
-        log.info("Direct BTC 15m slug discovery found %d/%d candidate events", len(events), len(slugs))
+        found_by_asset = Counter(asset_from_slug(str(event.get("slug") or "")) or "UNKNOWN" for event in events)
+        log.info(
+            "Direct multi-asset 15m discovery found %d/%d candidate events by_asset=%s",
+            len(events),
+            len(slugs),
+            dict(found_by_asset),
+        )
         return events
 
     async def _search_events(self, client: httpx.AsyncClient) -> list[dict[str, Any]]:
-        queries = []
-        for query in ("BTC Up or Down 15m", self.query):
-            if query and query not in queries:
+        queries: list[str] = []
+        for asset in self.assets:
+            query = f"{asset} Up or Down 15m"
+            if query not in queries:
                 queries.append(query)
+        if self.query and self.query not in queries:
+            queries.append(self.query)
 
         events: list[dict[str, Any]] = []
         for query in queries:
@@ -183,14 +258,10 @@ class MarketDiscovery:
         diagnostic_sample: dict[str, Any] | None = None
 
         for event in events:
-            event_text = " ".join(str(event.get(k) or "") for k in ("title", "slug", "ticker", "description")).lower()
-            if "bitcoin" not in event_text and "btc" not in event_text:
-                rejected["non_btc_event"] += 1
-                continue
-
             event_slug = str(event.get("slug") or "")
-            event_window = btc_15m_window_from_slug(event_slug)
-            event_phase = classify_btc_15m_slug(event_slug, now) if event_window else MarketPhase.OTHER
+            event_asset = asset_from_slug(event_slug)
+            event_window = updown_15m_window_from_slug(event_slug)
+            event_phase = classify_updown_15m_slug(event_slug, now) if event_window else MarketPhase.OTHER
             raw_markets = event.get("markets")
             markets = raw_markets if isinstance(raw_markets, list) else []
             if not markets and (event.get("clobTokenIds") or event.get("tokens")):
@@ -208,11 +279,18 @@ class MarketDiscovery:
 
                 question = str(market.get("question") or event.get("title") or "")
                 slug = str(market.get("slug") or event_slug or market.get("id") or "unknown")
-                recurring_window = btc_15m_window_from_slug(slug) or event_window
-                recurring_phase = classify_btc_15m_slug(slug, now) if btc_15m_window_from_slug(slug) else event_phase
+                asset = asset_from_slug(slug) or event_asset
+                if asset not in self.asset_set:
+                    rejected["asset_not_configured"] += 1
+                    continue
+
+                market_window = updown_15m_window_from_slug(slug)
+                recurring_window = market_window or event_window
+                recurring_phase = classify_updown_15m_slug(slug, now) if market_window else event_phase
 
                 if diagnostic_sample is None or recurring_phase in {MarketPhase.LIVE, MarketPhase.NEXT}:
                     diagnostic_sample = {
+                        "asset": asset,
                         "event_slug": event_slug,
                         "event_phase": event_phase.value,
                         "market_slug": slug,
@@ -294,7 +372,14 @@ class MarketDiscovery:
                     )
                 )
 
-        pairs.sort(key=lambda p: btc_15m_window_from_slug(p.slug)[0] if btc_15m_window_from_slug(p.slug) else (_parse_time(p.end_date) or datetime.max.replace(tzinfo=timezone.utc)))
+        pairs.sort(
+            key=lambda p: (
+                self.asset_order.get(asset_from_slug(p.slug) or "", 999),
+                updown_15m_window_from_slug(p.slug)[0]
+                if updown_15m_window_from_slug(p.slug)
+                else (_parse_time(p.end_date) or datetime.max.replace(tzinfo=timezone.utc)),
+            )
+        )
         phases = Counter(market_phase(pair, now).value for pair in pairs)
         if not pairs or not ({MarketPhase.LIVE.value, MarketPhase.NEXT.value} & set(phases)):
             log.warning("Discovery rejection summary: %s", dict(rejected))
@@ -319,9 +404,12 @@ class MarketDiscovery:
 
         pairs = self._pairs_from_events(list(events_by_key.values()), now)
         phases = Counter(market_phase(pair, now).value for pair in pairs)
+        by_asset = Counter(asset_from_slug(pair.slug) or "UNKNOWN" for pair in pairs)
         log.info(
-            "Discovered %d BTC Up/Down binary markets phases=%s (%d direct events, %d search events)",
+            "Discovered %d configured 15m Up/Down binary markets assets=%s by_asset=%s phases=%s (%d direct events, %d search events)",
             len(pairs),
+            self.assets,
+            dict(by_asset),
             dict(phases),
             len(direct_events),
             len(search_events),
