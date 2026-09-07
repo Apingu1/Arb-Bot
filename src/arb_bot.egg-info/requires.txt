@@ -1,0 +1,7 @@
+httpx<1,>=0.28
+python-dotenv<2,>=1
+websockets<17,>=15
+
+[dev]
+pytest<9,>=8
+pytest-asyncio<1,>=0.24

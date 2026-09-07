@@ -108,12 +108,18 @@ class Settings:
         default_factory=lambda: _decimal_tuple("HEDGE_TAKER_REBATE_SCENARIOS", "0,0.03,0.08,0.18,0.30,0.50")
     )
 
-    # Phase 1.5 EV-frontier instrumentation.
+    # Phase 1.5/1.5.1 EV-frontier instrumentation.
     hedge_ghost_enabled: bool = field(default_factory=lambda: _bool("HEDGE_GHOST_ENABLED", True))
     hedge_ghost_horizon_ms: int = field(default_factory=lambda: _int("HEDGE_GHOST_HORIZON_MS", 15000))
     hedge_ghost_max_active: int = field(default_factory=lambda: _int("HEDGE_GHOST_MAX_ACTIVE", 500))
 
     ev_frontier_enabled: bool = field(default_factory=lambda: _bool("EV_FRONTIER_ENABLED", True))
+    # Research-specific absolute-profit floor. This deliberately does NOT reuse
+    # HEDGE_MIN_EXPECTED_PROFIT_USDC, so 5/10/20/50 share variants are compared
+    # on the same per-share economics instead of different effective thresholds.
+    ev_min_expected_profit_usdc: Decimal = field(
+        default_factory=lambda: _decimal("EV_MIN_EXPECTED_PROFIT_USDC", "0.01")
+    )
     ev_grace_edge_target: Decimal = field(default_factory=lambda: _decimal("EV_GRACE_EDGE_TARGET", "0.005"))
     ev_grace_latency_ms: int = field(default_factory=lambda: _int("EV_GRACE_LATENCY_MS", 100))
     ev_grace_periods_ms: tuple[int, ...] = field(
@@ -129,8 +135,9 @@ class Settings:
         default_factory=lambda: _decimal_tuple("EV_SIZE_CANDIDATES", "5,10,20,50")
     )
 
-    # Split 1 pUSD into both outcomes, then shadow passive sells on both legs.
-    split_sell_enabled: bool = field(default_factory=lambda: _bool("SPLIT_SELL_ENABLED", True))
+    # Split-sell was strongly negative in Phase 1.5 and is disabled by default
+    # for the corrected run. It can still be explicitly re-enabled for history.
+    split_sell_enabled: bool = field(default_factory=lambda: _bool("SPLIT_SELL_ENABLED", False))
     split_sell_edge_targets: tuple[Decimal, ...] = field(
         default_factory=lambda: _decimal_tuple("SPLIT_SELL_EDGE_TARGETS", "0.005,0.010,0.015")
     )

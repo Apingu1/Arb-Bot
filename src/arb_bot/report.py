@@ -6,6 +6,7 @@ import json
 from collections import Counter, defaultdict
 from decimal import Decimal
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 
@@ -26,6 +27,10 @@ def _d(value: Any) -> Decimal:
     if value is None or value == "":
         return Decimal("0")
     return Decimal(str(value))
+
+
+def _avg(values: list[Decimal]) -> Decimal:
+    return sum(values, Decimal("0")) / Decimal(len(values)) if values else Decimal("0")
 
 
 def _load_rows(path: Path) -> list[dict[str, Any]]:
@@ -135,6 +140,16 @@ def _research_activity(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]
             "ghost_fills": 0,
             "ghost_profitable": 0,
             "ghost_target_profitable": 0,
+            "ghost_best_pnls": [],
+            "ghost_pnl_per_share": [],
+            "ghost_elapsed_ms": [],
+            "ghost_by_reason": defaultdict(lambda: {
+                "count": 0,
+                "profitable": 0,
+                "target": 0,
+                "pnls": [],
+                "elapsed_ms": [],
+            }),
         }
     )
     for row in events:
@@ -152,13 +167,52 @@ def _research_activity(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]
             stats[strategy]["cancel_reasons"][str(payload.get("reason") or "UNKNOWN")] += 1
         elif event_type == "hedge_ghost_outcome":
             stats[strategy]["ghost_outcomes"] += 1
-            if payload.get("outcome") == "WOULD_FILL":
-                stats[strategy]["ghost_fills"] += 1
-                if bool(payload.get("would_be_profitable")):
-                    stats[strategy]["ghost_profitable"] += 1
-                if bool(payload.get("would_clear_original_target")):
-                    stats[strategy]["ghost_target_profitable"] += 1
+            if payload.get("outcome") != "WOULD_FILL":
+                continue
+            s = stats[strategy]
+            s["ghost_fills"] += 1
+            profitable = bool(payload.get("would_be_profitable"))
+            target = bool(payload.get("would_clear_original_target"))
+            if profitable:
+                s["ghost_profitable"] += 1
+            if target:
+                s["ghost_target_profitable"] += 1
+
+            best_pnl = _d(payload.get("best_recovery_pnl"))
+            fill_qty = _d(payload.get("fill_qty"))
+            pnl_per_share = payload.get("best_recovery_pnl_per_share")
+            pnl_per_share_d = _d(pnl_per_share) if pnl_per_share is not None else (best_pnl / fill_qty if fill_qty > 0 else Decimal("0"))
+            elapsed = _d(payload.get("elapsed_ms"))
+            s["ghost_best_pnls"].append(best_pnl)
+            s["ghost_pnl_per_share"].append(pnl_per_share_d)
+            s["ghost_elapsed_ms"].append(elapsed)
+
+            reason = str(payload.get("cancel_reason") or "UNKNOWN")
+            by_reason = s["ghost_by_reason"][reason]
+            by_reason["count"] += 1
+            by_reason["profitable"] += int(profitable)
+            by_reason["target"] += int(target)
+            by_reason["pnls"].append(best_pnl)
+            by_reason["elapsed_ms"].append(elapsed)
     return stats
+
+
+def _ghost_reason_summary(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for reason, item in sorted(raw.items()):
+        pnls = list(item.get("pnls") or [])
+        elapsed = list(item.get("elapsed_ms") or [])
+        result[reason] = {
+            "count": int(item.get("count", 0)),
+            "profitable": int(item.get("profitable", 0)),
+            "target": int(item.get("target", 0)),
+            "avg_pnl": _avg(pnls),
+            "median_pnl": median(pnls) if pnls else Decimal("0"),
+            "best_pnl": max(pnls) if pnls else Decimal("0"),
+            "worst_pnl": min(pnls) if pnls else Decimal("0"),
+            "avg_elapsed_ms": _avg(elapsed),
+        }
+    return result
 
 
 def build_report(path: Path) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
@@ -214,6 +268,11 @@ def build_report(path: Path) -> tuple[dict[str, dict[str, Any]], list[dict[str, 
         mid_rows = [row for row in rows if row.get("regime") == "MID"]
         extreme_rows = [row for row in rows if row.get("regime") == "EXTREME"]
         act = activity.get(strategy, {})
+        ghost_best = list(act.get("ghost_best_pnls", []) or [])
+        ghost_ps = list(act.get("ghost_pnl_per_share", []) or [])
+        ghost_elapsed = list(act.get("ghost_elapsed_ms", []) or [])
+        ghost_fills = int(act.get("ghost_fills", 0))
+        sample_status = "REALIZED" if rows else ("GHOST_ONLY" if ghost_fills else "INSUFFICIENT_DATA")
         summary[strategy] = {
             "events": len(rows), "wins": wins, "losses": losses, "flats": flats, "pnl": pnl,
             "statuses": statuses,
@@ -225,9 +284,17 @@ def build_report(path: Path) -> tuple[dict[str, dict[str, Any]], list[dict[str, 
             "cancellations": int(act.get("cancellations", 0)),
             "cancel_reasons": act.get("cancel_reasons", Counter()),
             "ghost_outcomes": int(act.get("ghost_outcomes", 0)),
-            "ghost_fills": int(act.get("ghost_fills", 0)),
+            "ghost_fills": ghost_fills,
             "ghost_profitable": int(act.get("ghost_profitable", 0)),
             "ghost_target_profitable": int(act.get("ghost_target_profitable", 0)),
+            "ghost_avg_best_pnl": _avg(ghost_best),
+            "ghost_median_best_pnl": median(ghost_best) if ghost_best else Decimal("0"),
+            "ghost_best_pnl": max(ghost_best) if ghost_best else Decimal("0"),
+            "ghost_worst_pnl": min(ghost_best) if ghost_best else Decimal("0"),
+            "ghost_avg_pnl_per_share": _avg(ghost_ps),
+            "ghost_avg_elapsed_ms": _avg(ghost_elapsed),
+            "ghost_by_reason": _ghost_reason_summary(act.get("ghost_by_reason", {})),
+            "sample_status": sample_status,
         }
     return summary, executions
 
@@ -242,7 +309,7 @@ def write_csv(rows: list[dict[str, Any]], path: Path) -> None:
 
 
 def cli() -> None:
-    parser = argparse.ArgumentParser(description="Summarize TAKER, MAKER/HYBRID, HEDGE, EV-frontier and SPLITSELL shadow research")
+    parser = argparse.ArgumentParser(description="Summarize TAKER, MAKER/HYBRID, HEDGE and corrected EV-frontier shadow research")
     parser.add_argument("path", nargs="?", default="data/shadow_events.jsonl", help="Shadow JSONL path")
     parser.add_argument("--csv", dest="csv_path", default=None, help="Optional flat execution CSV output path")
     args = parser.parse_args()
@@ -250,7 +317,7 @@ def cli() -> None:
     path = Path(args.path)
     summary, executions = build_report(path)
     print(f"Shadow strategy report: {path}")
-    print("=" * 132)
+    print("=" * 160)
     if not summary:
         print("No finalized strategy or research events found.")
     for strategy, item in summary.items():
@@ -265,15 +332,33 @@ def cli() -> None:
         if item["placements"] or item["cancellations"] or item["ghost_outcomes"]:
             reason_text = ",".join(f"{k}:{v}" for k, v in sorted(item["cancel_reasons"].items())) or "-"
             research = (
-                f" | placed={item['placements']} cancel={item['cancellations']}[{reason_text}]"
+                f" | sample={item['sample_status']} placed={item['placements']} cancel={item['cancellations']}[{reason_text}]"
                 f" ghost_fill={item['ghost_fills']}/{item['ghost_outcomes']}"
                 f" ghost_profit={item['ghost_profitable']} target={item['ghost_target_profitable']}"
             )
+            if item["ghost_fills"]:
+                research += (
+                    f" ghost_pnl(avg/med/best/worst)={float(item['ghost_avg_best_pnl']):+.4f}/"
+                    f"{float(item['ghost_median_best_pnl']):+.4f}/"
+                    f"{float(item['ghost_best_pnl']):+.4f}/"
+                    f"{float(item['ghost_worst_pnl']):+.4f}"
+                    f" avg_sh={float(item['ghost_avg_pnl_per_share']):+.4f}"
+                    f" avg_t={float(item['ghost_avg_elapsed_ms']):.0f}ms"
+                )
         print(
             f"{strategy:24s} | events={item['events']:4d} wins={item['wins']:4d} "
             f"losses={item['losses']:4d} flats={item['flats']:4d} "
             f"pnl={float(item['pnl']):+.4f} pUSD | {statuses}{regime}{research}"
         )
+        if item.get("ghost_by_reason"):
+            reason_parts = []
+            for reason, detail in item["ghost_by_reason"].items():
+                reason_parts.append(
+                    f"{reason}:n={detail['count']} avg={float(detail['avg_pnl']):+.4f} "
+                    f"best={float(detail['best_pnl']):+.4f} worst={float(detail['worst_pnl']):+.4f} "
+                    f"prof={detail['profitable']} target={detail['target']} t={float(detail['avg_elapsed_ms']):.0f}ms"
+                )
+            print("  ghost by cancel | " + " | ".join(reason_parts))
 
     if args.csv_path:
         csv_path = Path(args.csv_path)

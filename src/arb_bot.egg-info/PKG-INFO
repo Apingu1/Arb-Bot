@@ -1,0 +1,330 @@
+Metadata-Version: 2.4
+Name: arb-bot
+Version: 0.1.0
+Summary: Risk-aware Polymarket binary complete-set arbitrage research and shadow execution bot
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: httpx<1,>=0.28
+Requires-Dist: python-dotenv<2,>=1
+Requires-Dist: websockets<17,>=15
+Provides-Extra: dev
+Requires-Dist: pytest<9,>=8; extra == "dev"
+Requires-Dist: pytest-asyncio<1,>=0.24; extra == "dev"
+
+# Arb-Bot — Phase 1.5 EV Frontier Shadow Research
+
+This repository is a **simulation-only research bot** for Polymarket BTC Up/Down 15-minute markets. It consumes the live public CLOB market feed and compares alternative complete-set / market-making strategies under realistic depth, taker fees, queue position, latency, partial fills, adverse selection and recovery risk.
+
+**No wallet, private key, signing, live order placement or geoblock bypass is implemented.**
+
+## Why Phase 1.5 exists
+
+Earlier phases established three important facts:
+
+1. Pure two-leg TAKER arbitrage is usually destroyed by taker fees and is highly sensitive to leg-miss latency.
+2. Simultaneous complementary MAKER bids get filled much more often, but the first fill is commonly the toxic side and the second maker fill is rare.
+3. Phase 1.4 HEDGE maker->taker orders are much safer because they are only quoted when the opposite taker hedge is already profitable, but they often sit too far back in the queue and cancel before filling.
+
+Phase 1.5 therefore does **not** simply loosen the thresholds. It measures the missing execution frontier directly.
+
+## Live market handling
+
+The recurring BTC series uses deterministic slugs:
+
+```text
+btc-updown-15m-{UTC_UNIX_INTERVAL_START}
+```
+
+The bot keeps the true LIVE and NEXT 15-minute markets subscribed at the same time. Strategy execution is restricted to LIVE; NEXT remains warm for rollover.
+
+## Research families
+
+All strategies observe the exact same external market events but maintain independent virtual queues, inventory and equity. They never fill one another.
+
+### TAKER control
+
+The original depth-aware two-leg complete-set scanner remains unchanged. It includes:
+
+- crypto taker fees per execution segment;
+- configurable detection/execution latency;
+- FOK-style price limits;
+- delayed one-leg recovery;
+- complete-vs-unwind recovery comparison;
+- empirical leg-miss risk measurement.
+
+### MAKER / HYBRID controls
+
+The Phase 1.3 queue-aware controls remain active:
+
+```text
+MAKER-99 / 98 / 97 / 96
+HYBRID-99 / 98 / 97 / 96
+```
+
+Maker BUY fills require confirmed external SELL trade volume to consume the displayed queue ahead or trade through the virtual price.
+
+### Phase 1.4 HEDGE controls
+
+The hedgeability-first matrix remains active:
+
+```text
+net edge targets: 0.5c / 1.0c / 1.5c / 2.0c per share
+hedge latency:    50 / 100 / 200 ms
+```
+
+A HEDGE maker BUY is only placed when the opposite executable taker ask already supports a complete-set profit after taker fee, target edge and latency reserve.
+
+## Phase 1.5 EV frontier
+
+### 1. Grace-period family
+
+The strict Phase 1.4 rule cancels immediately when hedgeability drops below the target. Phase 1.5 tests bounded temporary AMBER periods:
+
+```text
+0 ms
+100 ms
+250 ms
+500 ms
+```
+
+The grace family holds all other variables fixed so the effect of grace alone can be measured.
+
+A hard loss ceiling remains authoritative. With the default:
+
+```text
+EV_HARD_LOSS_PER_SHARE=0.005
+```
+
+projected complete-set economics worse than -0.5c/share cancel immediately even when a grace timer remains.
+
+### 2. Fixed-size family
+
+The Phase 1.4 engine chose the largest fully hedgeable size from several candidates. Phase 1.5 separately tests:
+
+```text
+5
+10
+20
+50 shares
+```
+
+at the same edge/latency/grace settings, allowing direct estimation of how size changes queue position, fill probability, hedge probability and EV.
+
+### 3. Cancellation diagnostics
+
+Every EV-frontier cancellation records:
+
+- cancellation reason;
+- quote age;
+- initial queue ahead;
+- queue remaining at cancellation;
+- fraction of the queue consumed before cancellation.
+
+The terminal prints cancellation mixes such as:
+
+```text
+HEDGEABILITY_DROPPED
+HEDGEABILITY_GRACE_EXPIRED
+HARD_LOSS
+SURGE
+MAX_QUOTE_AGE
+NEAR_EXPIRY
+WINDOW_ROLLOVER
+```
+
+### 4. Ghost cancelled orders
+
+A cancelled EV order can remain as a **non-P&L ghost** for a configured observation horizon.
+
+Ghosts answer:
+
+```text
+Would the cancelled order later have filled?
+How much later?
+How much queue remained?
+Would the opposite taker completion then have been profitable?
+Would completion or unwind have been the better recovery?
+Would the original edge target still have been achieved?
+```
+
+Ghosts never change strategy equity. They are counterfactual diagnostics only.
+
+Defaults:
+
+```text
+HEDGE_GHOST_ENABLED=true
+HEDGE_GHOST_HORIZON_MS=15000
+```
+
+### 5. Empirical EV ranking
+
+Each EV-frontier strategy reports:
+
+```text
+P(fill)
+P(direct hedge | fill)
+average direct-hedge P&L
+average recovery P&L
+modeled EV / placement
+realized EV / placement
+```
+
+The modeled research estimate is:
+
+```text
+P(fill) × [
+    P(hedge | fill) × avg_direct_hedge_pnl
+  + (1 - P(hedge | fill)) × avg_recovery_pnl
+]
+```
+
+The terminal also prints the top EV-frontier variants by modeled/realized EV. Small samples should not be treated as conclusive.
+
+## SPLITSELL mirror experiment
+
+Phase 1.5 also tests the mirror side of the complete-set spread:
+
+```text
+split q pUSD
+    -> q UP + q DOWN
+
+passively SELL UP
+passively SELL DOWN
+```
+
+If both maker sells fill above a combined $1 cost, the excess revenue is profit.
+
+Maker SELL fills are queue-aware and require confirmed external BUY trade volume at/through the virtual ask.
+
+If only one side fills:
+
+1. balanced remaining UP/DOWN inventory is merged back into pUSD;
+2. only the unmatched residual token is taker-sold into the live bid book;
+3. the taker fee on that residual unwind is charged;
+4. realized P&L is recorded independently.
+
+Default split-sell edge targets:
+
+```text
+0.5c / 1.0c / 1.5c per share
+```
+
+## SURGE / toxic-flow gate
+
+New passive exposure remains gated by short-horizon price movement and update intensity. Existing inventory continues to be managed during SURGE rather than abandoned.
+
+## Data
+
+The default append-only dataset is:
+
+```text
+data/shadow_events.jsonl
+```
+
+Important Phase 1.5 event types include:
+
+```text
+hedge_campaign_placed
+hedge_campaign_cancelled
+hedge_grace_entered
+hedge_ghost_created
+hedge_ghost_outcome
+hedge_execution_summary
+split_sell_campaign_placed
+split_sell_queue_fill
+split_sell_campaign_cancelled
+split_sell_execution_summary
+strategy_equity
+edge_observation
+```
+
+## Reporting
+
+Run:
+
+```bash
+arb-report
+```
+
+The report now includes strategies even when they have **zero finalized executions** but have placement/cancellation/ghost activity. That prevents a safe-but-never-filled HEDGE strategy from disappearing from the analysis.
+
+Create a flat execution CSV with:
+
+```bash
+arb-report --csv data/phase1_5_execution_summary.csv
+```
+
+Ghost outcomes and cancellation activity remain in JSONL because they are research observations rather than realized executions.
+
+## Install / run
+
+Requires Python 3.12+.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
+cp .env.example .env
+pytest
+arb-bot
+```
+
+When updating an existing Codespace branch:
+
+```bash
+git fetch origin
+git checkout phase1.5/ev-frontier
+git pull origin phase1.5/ev-frontier
+pip install -e '.[dev]'
+pytest
+arb-bot
+```
+
+Before a new phase, preserve the prior dataset instead of mixing experiments:
+
+```bash
+mv data/shadow_events.jsonl data/phase1_4_final_baseline.jsonl
+```
+
+## Important Phase 1.5 settings
+
+```text
+EV_GRACE_EDGE_TARGET=0.005
+EV_GRACE_LATENCY_MS=100
+EV_GRACE_PERIODS_MS=0,100,250,500
+EV_GRACE_TRADE_SHARES=5
+EV_HARD_LOSS_PER_SHARE=0.005
+
+EV_SIZE_EDGE_TARGET=0.005
+EV_SIZE_LATENCY_MS=100
+EV_SIZE_GRACE_MS=250
+EV_SIZE_CANDIDATES=5,10,20,50
+
+HEDGE_GHOST_ENABLED=true
+HEDGE_GHOST_HORIZON_MS=15000
+
+SPLIT_SELL_ENABLED=true
+SPLIT_SELL_EDGE_TARGETS=0.005,0.010,0.015
+SPLIT_SELL_SHARES=5
+SPLIT_SELL_INVENTORY_TIMEOUT_MS=5000
+```
+
+See `.env.example` for the full configuration.
+
+## Interpretation
+
+A strategy is not considered promising merely because it avoids losses by never filling. Phase 1.5 is specifically designed to distinguish:
+
+```text
+safe but unfillable
+vs
+frequent but toxic
+vs
+positive expected value
+```
+
+The decision metrics are fill probability, hedge success conditional on fill, recovery loss, queue consumption, ghost counterfactual outcomes and realized/modelled EV per placement.
+
+## Safety / scope
+
+This is research software, not a profitability guarantee. It remains observer/shadow only. Any future live execution should only be considered where the venue permits order placement and after a sufficiently large shadow sample demonstrates robust positive expectancy under realistic execution assumptions.
