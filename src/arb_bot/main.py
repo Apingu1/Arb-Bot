@@ -12,6 +12,8 @@ from .config import Settings
 from .diagnostics import LiveDiagnostics
 from .discovery import MarketPhase, MarketDiscovery, market_phase, select_live_and_next_pairs
 from .edge_tracker import EdgeTracker
+from .hybrid_shadow import HybridShadowEngine
+from .maker_shadow import MakerShadowEngine
 from .polymarket_ws import PolymarketMarketStream
 from .simulator import ShadowExecutor
 from .storage import JsonlRecorder
@@ -28,7 +30,7 @@ async def check_geoblock(settings: Settings) -> None:
             response.raise_for_status()
             geo = response.json()
         log.info(
-            "Polymarket geoblock: blocked=%s country=%s region=%s (Phase 1 never submits live orders)",
+            "Polymarket geoblock: blocked=%s country=%s region=%s (shadow engines never submit live orders)",
             geo.get("blocked"),
             geo.get("country"),
             geo.get("region"),
@@ -44,21 +46,30 @@ async def run() -> None:
         level=getattr(logging, settings.log_level, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
-    log.warning("PHASE 1 SHADOW MODE: live order placement is intentionally not implemented.")
+    log.warning(
+        "PHASE 1.2 MULTI-STRATEGY SHADOW MODE: TAKER/MAKER/HYBRID are simulation-only; live order placement is not implemented."
+    )
     await check_geoblock(settings)
 
     recorder = JsonlRecorder(settings.output_path)
     discovery = MarketDiscovery(settings.gamma_url, settings.market_query)
     engine = ArbitrageEngine(settings)
-    shadow = ShadowExecutor(settings, recorder)
+    taker = ShadowExecutor(settings, recorder)
+    maker = MakerShadowEngine(settings, recorder)
+    hybrid = HybridShadowEngine(settings, recorder)
     edge_tracker = EdgeTracker(recorder, settings.edge_record_min_interval_ms)
     diagnostics = LiveDiagnostics(settings.diagnostic_interval_seconds)
     stream = PolymarketMarketStream(settings.websocket_url)
     started = time.monotonic()
 
+    def process_strategy_timers() -> None:
+        taker.process_due(engine.books)
+        maker.process_due(engine)
+        hybrid.process_due(engine)
+
     async def handle(message: dict) -> None:
-        shadow.process_due(engine.books)
         market_id = engine.apply_event(message)
+        process_strategy_timers()
         diagnostics.observe(message, market_id)
         if not market_id:
             return
@@ -75,21 +86,32 @@ async def run() -> None:
             exchange_timestamp=message.get("timestamp"),
         )
 
-        # Shadow intents are deliberately restricted to the true current LIVE
-        # window. NEXT is subscribed/recorded only so rollover starts warm.
-        if phase != MarketPhase.LIVE or not shadow.can_submit(market_id):
-            return
+        # Maker and hybrid engines see the same exact post-update book state.
+        maker.on_market_update(engine, market_id)
+        hybrid.on_market_update(engine, market_id)
 
+        # Pure taker intents remain restricted to the true current LIVE window.
+        if phase != MarketPhase.LIVE or not taker.can_submit(market_id):
+            return
         opportunity = engine.evaluate(market_id)
         if opportunity:
-            shadow.submit(opportunity)
+            taker.submit(opportunity)
+
+    async def timer_loop() -> None:
+        # Independent high-frequency clock: execution/recovery timers should not
+        # depend on another WebSocket message arriving and should never wait for
+        # the 10-second diagnostic heartbeat.
+        while True:
+            await asyncio.sleep(0.01)
+            process_strategy_timers()
 
     async def diagnostic_loop() -> None:
         while True:
             await asyncio.sleep(settings.diagnostic_interval_seconds)
-            shadow.process_due(engine.books)
-            diagnostics.maybe_log(engine, shadow, edge_tracker)
+            process_strategy_timers()
+            diagnostics.maybe_log(engine, taker, edge_tracker, maker, hybrid)
 
+    timer_task = asyncio.create_task(timer_loop(), name="shadow-timers")
     diagnostic_task = asyncio.create_task(diagnostic_loop(), name="live-diagnostics")
     try:
         while True:
@@ -125,6 +147,9 @@ async def run() -> None:
                 max(0, len(pairs) - len(stream_pairs)),
             )
 
+            # Give strategy engines one final chance to settle old-window state
+            # before pruning token books during rollover.
+            process_strategy_timers()
             engine.set_markets(stream_pairs)
             token_ids = [token for pair in stream_pairs for token in (pair.token_a, pair.token_b)]
             refresh = settings.market_refresh_seconds
@@ -134,22 +159,22 @@ async def run() -> None:
             try:
                 await asyncio.wait_for(stream.run(token_ids, handle), timeout=refresh)
             except TimeoutError:
-                shadow.process_due(engine.books)
+                process_strategy_timers()
                 log.info("Refreshing active-market discovery")
             except asyncio.CancelledError:
                 raise
     finally:
+        timer_task.cancel()
         diagnostic_task.cancel()
-        await asyncio.gather(diagnostic_task, return_exceptions=True)
+        await asyncio.gather(timer_task, diagnostic_task, return_exceptions=True)
 
-    shadow.process_due(engine.books)
-    diagnostics.maybe_log(engine, shadow, edge_tracker)
+    process_strategy_timers()
+    diagnostics.maybe_log(engine, taker, edge_tracker, maker, hybrid)
     log.info(
-        "Finished shadow run: pnl=%+.4f completed=%d leg_misses=%d rejected=%d",
-        float(shadow.total_pnl),
-        shadow.completed,
-        shadow.leg_misses,
-        shadow.rejected,
+        "Finished shadow run | TAKER=%+.4f MAKER=%+.4f HYBRID=%+.4f pUSD",
+        float(taker.total_pnl),
+        float(maker.total_pnl),
+        float(hybrid.total_pnl),
     )
 
 
