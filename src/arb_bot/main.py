@@ -9,9 +9,10 @@ import httpx
 from dotenv import load_dotenv
 
 from .config import Settings
+from .dashboard import DashboardServer, DashboardState
 from .diagnostics import LiveDiagnostics
 from .diagnostics_v16 import log_dual_fok_diagnostics
-from .discovery import MarketPhase, MarketDiscovery, market_phase, select_live_and_next_pairs
+from .discovery import MarketPhase, MarketDiscovery, asset_from_slug, market_phase, select_live_and_next_pairs
 from .dual_fok_research import DualFOKResearchSuite
 from .edge_tracker import EdgeTracker
 from .ev_frontier import SplitSellResearchSuite
@@ -51,7 +52,14 @@ async def run() -> None:
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
     log.warning(
-        "PHASE 1.6 DUAL-FOK EXECUTION FRONTIER SHADOW MODE: all TAKER/MAKER/HEDGE/EV/DFOK/RFOK strategies are simulation-only; live order placement is not implemented."
+        "PHASE 1.7 MULTI-ASSET TERMINAL SHADOW MODE: all TAKER/MAKER/HEDGE/EV/DFOK/RFOK strategies are simulation-only; live order placement is not implemented."
+    )
+    log.info(
+        "Market universe | assets=%s lookahead=%d intervals | dashboard=%s port=%d",
+        settings.market_assets,
+        settings.market_lookahead_intervals,
+        settings.dashboard_enabled,
+        settings.dashboard_port,
     )
     log.info(
         "Dual-FOK research | base_latency=%dms skews=%s sizes=%s edges=%s coverage=%s stability=%s surge_gate=%s leg_order=%s",
@@ -72,13 +80,23 @@ async def run() -> None:
     if not settings.split_sell_enabled:
         log.info("SPLITSELL remains disabled after strongly negative Phase 1.5 evidence")
     if settings.reverse_dual_fok_enabled:
-        log.info(
-            "RFOK assumption | complete-set inventory is pre-positioned before detection; no hidden split latency is credited"
-        )
+        log.info("RFOK assumption | complete-set inventory is pre-positioned before detection; no hidden split latency is credited")
     await check_geoblock(settings)
 
     recorder = JsonlRecorder(settings.output_path)
-    discovery = MarketDiscovery(settings.gamma_url, settings.market_query)
+    dashboard_state = DashboardState(settings)
+    dashboard_state.bootstrap(settings.output_path)
+    recorder.subscribe(dashboard_state.on_event)
+    dashboard_server = DashboardServer(settings, dashboard_state.snapshot) if settings.dashboard_enabled else None
+    if dashboard_server is not None:
+        dashboard_server.start()
+
+    discovery = MarketDiscovery(
+        settings.gamma_url,
+        settings.market_query,
+        settings.market_assets,
+        lookahead_intervals=settings.market_lookahead_intervals,
+    )
     engine = ArbitrageEngine(settings)
     taker = ShadowExecutor(settings, recorder)
     research = MakerResearchSuite(settings, recorder)
@@ -99,6 +117,21 @@ async def run() -> None:
         dual_fok.process_due(engine)
         if split_sell is not None:
             split_sell.process_due(engine)
+
+    def publish_dashboard() -> None:
+        if not settings.dashboard_enabled:
+            return
+        dashboard_state.publish(
+            engine,
+            taker,
+            edge_tracker,
+            diagnostics,
+            research=research,
+            hedge=hedge,
+            frontier=frontier,
+            dual_fok=dual_fok,
+            split_sell=split_sell,
+        )
 
     async def handle(message: dict) -> None:
         market_id = engine.apply_event(message)
@@ -154,8 +187,16 @@ async def run() -> None:
             )
             log_dual_fok_diagnostics(dual_fok)
 
+    async def dashboard_loop() -> None:
+        while True:
+            publish_dashboard()
+            await asyncio.sleep(max(0.1, settings.dashboard_refresh_ms / 1000))
+
     timer_task = asyncio.create_task(timer_loop(), name="shadow-timers")
     diagnostic_task = asyncio.create_task(diagnostic_loop(), name="live-diagnostics")
+    dashboard_task = asyncio.create_task(dashboard_loop(), name="dashboard-publisher") if settings.dashboard_enabled else None
+    tasks = [timer_task, diagnostic_task] + ([dashboard_task] if dashboard_task is not None else [])
+
     try:
         while True:
             if settings.run_seconds and time.monotonic() - started >= settings.run_seconds:
@@ -167,7 +208,7 @@ async def run() -> None:
                 await asyncio.sleep(5)
                 continue
             if not pairs:
-                log.warning("No BTC Up/Down markets found; retrying shortly")
+                log.warning("No configured 15m Up/Down markets found; retrying shortly")
                 await asyncio.sleep(min(settings.market_refresh_seconds, 15))
                 continue
 
@@ -181,17 +222,22 @@ async def run() -> None:
                 await asyncio.sleep(min(settings.market_refresh_seconds, 15))
                 continue
             if not live_pairs:
-                log.warning("No LIVE BTC 15m market found; subscribing to NEXT only until refresh")
+                log.warning("No LIVE configured 15m market found; subscribing to NEXT markets until refresh")
 
+            live_by_asset = {asset_from_slug(pair.slug): pair.slug for pair in live_pairs}
+            next_by_asset = {asset_from_slug(pair.slug): pair.slug for pair in next_pairs}
             log.info(
-                "Stream focus | LIVE=%s | NEXT=%s | excluding %d distant/expired markets",
-                ",".join(pair.slug for pair in live_pairs) or "none",
-                ",".join(pair.slug for pair in next_pairs) or "none",
+                "Stream focus | LIVE=%s | NEXT=%s | pairs=%d tokens=%d | excluding %d distant/expired markets",
+                live_by_asset or "none",
+                next_by_asset or "none",
+                len(stream_pairs),
+                len(stream_pairs) * 2,
                 max(0, len(pairs) - len(stream_pairs)),
             )
 
             process_strategy_timers()
             engine.set_markets(stream_pairs)
+            publish_dashboard()
             token_ids = [token for pair in stream_pairs for token in (pair.token_a, pair.token_b)]
             refresh = settings.market_refresh_seconds
             if settings.run_seconds:
@@ -201,13 +247,18 @@ async def run() -> None:
                 await asyncio.wait_for(stream.run(token_ids, handle), timeout=refresh)
             except TimeoutError:
                 process_strategy_timers()
+                publish_dashboard()
                 log.info("Refreshing active-market discovery")
             except asyncio.CancelledError:
                 raise
     finally:
-        timer_task.cancel()
-        diagnostic_task.cancel()
-        await asyncio.gather(timer_task, diagnostic_task, return_exceptions=True)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        publish_dashboard()
+        recorder.unsubscribe(dashboard_state.on_event)
+        if dashboard_server is not None:
+            dashboard_server.stop()
 
     process_strategy_timers()
     diagnostics.maybe_log(
@@ -220,7 +271,7 @@ async def run() -> None:
         split_sell=split_sell,
     )
     log_dual_fok_diagnostics(dual_fok)
-    log.info("Finished Phase 1.6 shadow run | legacy TAKER=%+.4f pUSD", float(taker.total_pnl))
+    log.info("Finished Phase 1.7 shadow run | legacy TAKER=%+.4f pUSD", float(taker.total_pnl))
     for row in dual_fok.ranked_rows():
         log.info(
             "Finished %s | dir=%s eq=%+.4f placements=%d both=%d miss=%d neither=%d p_both=%.2f%% p_miss=%.2f%% EV/place=%+.5f life_avg=%.1fms life_p50=%.1fms",
