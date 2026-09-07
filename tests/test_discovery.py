@@ -5,23 +5,10 @@ from arb_bot.discovery import (
     MarketPhase,
     btc_15m_candidate_slugs,
     btc_15m_window_from_slug,
-    market_phase,
-    select_stream_pairs,
+    classify_btc_15m_slug,
+    select_live_and_next_pairs,
 )
 from arb_bot.models import MarketPair
-
-
-def _pair(slug: str) -> MarketPair:
-    return MarketPair(
-        market_id=slug,
-        condition_id=None,
-        slug=slug,
-        question="BTC Up or Down 15m",
-        outcome_a="Up",
-        outcome_b="Down",
-        token_a=f"{slug}-up",
-        token_b=f"{slug}-down",
-    )
 
 
 def test_btc_15m_candidate_slugs_are_aligned_to_current_window():
@@ -41,23 +28,43 @@ def test_btc_15m_window_is_derived_from_slug_timestamp():
     assert end == datetime(2026, 9, 7, 6, 0, tzinfo=timezone.utc)
 
 
-def test_market_phase_classifies_live_next_future_and_expired():
-    now = datetime(2026, 9, 7, 5, 43, tzinfo=timezone.utc)
-    assert market_phase(_pair("btc-updown-15m-1788758100"), now) == MarketPhase.EXPIRED
-    assert market_phase(_pair("btc-updown-15m-1788759000"), now) == MarketPhase.LIVE
-    assert market_phase(_pair("btc-updown-15m-1788759900"), now) == MarketPhase.NEXT
-    assert market_phase(_pair("btc-updown-15m-1788760800"), now) == MarketPhase.FUTURE
+def test_classifies_live_next_future_expired():
+    now = datetime(2026, 9, 7, 6, 34, tzinfo=timezone.utc)
+    assert classify_btc_15m_slug("btc-updown-15m-1788762600", now) is MarketPhase.LIVE
+    assert classify_btc_15m_slug("btc-updown-15m-1788763500", now) is MarketPhase.NEXT
+    assert classify_btc_15m_slug("btc-updown-15m-1788764400", now) is MarketPhase.FUTURE
+    assert classify_btc_15m_slug("btc-updown-15m-1788761700", now) is MarketPhase.EXPIRED
 
 
-def test_stream_selection_keeps_only_live_and_next():
-    now = datetime(2026, 9, 7, 5, 43, tzinfo=timezone.utc)
-    live = _pair("btc-updown-15m-1788759000")
-    next_pair = _pair("btc-updown-15m-1788759900")
-    future = _pair("btc-updown-15m-1788760800")
+def test_select_live_and_next_pairs_only():
+    now = datetime(2026, 9, 7, 6, 34, tzinfo=timezone.utc)
 
-    selected = select_stream_pairs([future, next_pair, live], now)
+    def pair(slug: str) -> MarketPair:
+        return MarketPair(
+            market_id=slug,
+            condition_id=None,
+            slug=slug,
+            question="BTC Up or Down 15m",
+            outcome_a="Up",
+            outcome_b="Down",
+            token_a=f"{slug}-up",
+            token_b=f"{slug}-down",
+            end_date=None,
+        )
 
-    assert [pair.slug for pair in selected] == [live.slug, next_pair.slug]
+    selected = select_live_and_next_pairs(
+        [
+            pair("btc-updown-15m-1788761700"),
+            pair("btc-updown-15m-1788762600"),
+            pair("btc-updown-15m-1788763500"),
+            pair("btc-updown-15m-1788764400"),
+        ],
+        now,
+    )
+    assert [p.slug for p in selected] == [
+        "btc-updown-15m-1788762600",
+        "btc-updown-15m-1788763500",
+    ]
 
 
 def test_current_gamma_event_shape_produces_binary_market_pair():
@@ -98,35 +105,6 @@ def test_current_gamma_event_shape_produces_binary_market_pair():
     assert pairs[0].outcome_b == "Down"
 
 
-def test_recurring_live_window_ignores_lagging_gamma_status_flags():
-    now = datetime(2026, 9, 7, 5, 43, tzinfo=timezone.utc)
-    discovery = MarketDiscovery("https://gamma-api.polymarket.com", "BTC Up or Down 15m")
-    events = [
-        {
-            "id": "event-live",
-            "slug": "btc-updown-15m-1788759000",
-            "title": "BTC Up or Down 15m",
-            "markets": [
-                {
-                    "id": "market-live",
-                    "slug": "btc-updown-15m-1788759000",
-                    "question": "Bitcoin Up or Down",
-                    "active": False,
-                    "closed": True,
-                    "enableOrderBook": False,
-                    "outcomes": '["Up", "Down"]',
-                    "clobTokenIds": '["live-up", "live-down"]',
-                }
-            ],
-        }
-    ]
-
-    pairs = discovery._pairs_from_events(events, now)
-
-    assert len(pairs) == 1
-    assert market_phase(pairs[0], now) == MarketPhase.LIVE
-
-
 def test_date_only_gamma_end_date_does_not_expire_live_15m_market():
     now = datetime(2026, 9, 7, 5, 51, tzinfo=timezone.utc)
     discovery = MarketDiscovery("https://gamma-api.polymarket.com", "BTC Up or Down 15m")
@@ -160,6 +138,64 @@ def test_date_only_gamma_end_date_does_not_expire_live_15m_market():
     assert len(pairs) == 1
     assert pairs[0].market_id == "market-live"
     assert pairs[0].end_date == "2026-09-07T06:00:00Z"
+
+
+def test_live_recurring_market_survives_lagging_gamma_status_flags():
+    now = datetime(2026, 9, 7, 6, 34, tzinfo=timezone.utc)
+    discovery = MarketDiscovery("https://gamma-api.polymarket.com", "BTC Up or Down 15m")
+    events = [
+        {
+            "id": "event-live-lag",
+            "slug": "btc-updown-15m-1788762600",
+            "title": "BTC Up or Down 15m",
+            "markets": [
+                {
+                    "id": "market-live-lag",
+                    "slug": "btc-updown-15m-1788762600",
+                    "question": "Bitcoin Up or Down",
+                    "active": False,
+                    "closed": True,
+                    "enableOrderBook": False,
+                    "acceptingOrders": False,
+                    "outcomes": '["Up", "Down"]',
+                    "clobTokenIds": '["up-live", "down-live"]',
+                }
+            ],
+        }
+    ]
+
+    pairs = discovery._pairs_from_events(events, now)
+    assert len(pairs) == 1
+    assert pairs[0].slug == "btc-updown-15m-1788762600"
+
+
+def test_next_recurring_market_survives_preopen_gamma_flags():
+    now = datetime(2026, 9, 7, 6, 34, tzinfo=timezone.utc)
+    discovery = MarketDiscovery("https://gamma-api.polymarket.com", "BTC Up or Down 15m")
+    events = [
+        {
+            "id": "event-next",
+            "slug": "btc-updown-15m-1788763500",
+            "title": "BTC Up or Down 15m",
+            "markets": [
+                {
+                    "id": "market-next",
+                    "slug": "btc-updown-15m-1788763500",
+                    "question": "Bitcoin Up or Down",
+                    "active": False,
+                    "closed": False,
+                    "enableOrderBook": False,
+                    "acceptingOrders": False,
+                    "outcomes": '["Up", "Down"]',
+                    "clobTokenIds": '["up-next", "down-next"]',
+                }
+            ],
+        }
+    ]
+
+    pairs = discovery._pairs_from_events(events, now)
+    assert len(pairs) == 1
+    assert pairs[0].slug == "btc-updown-15m-1788763500"
 
 
 def test_slug_window_still_rejects_finished_15m_market():
