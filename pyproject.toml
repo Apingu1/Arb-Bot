@@ -23,6 +23,7 @@ dev = [
 [project.scripts]
 arb-bot = "arb_bot.main:cli"
 arb-report = "arb_bot.report:cli"
+arb-ui = "arb_bot.dashboard:ui_cli"
 
 [tool.setuptools.packages.find]
 where = ["src"]
