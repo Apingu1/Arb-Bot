@@ -42,7 +42,7 @@ class LiveDiagnostics:
     def due(self) -> bool:
         return time.monotonic() - self.last_log >= self.interval_seconds
 
-    def maybe_log(self, engine: ArbitrageEngine, taker, edge_tracker: EdgeTracker, maker=None, hybrid=None) -> None:
+    def maybe_log(self, engine: ArbitrageEngine, taker, edge_tracker: EdgeTracker, *, research=None) -> None:
         now = time.monotonic()
         if now - self.last_log < self.interval_seconds:
             return
@@ -72,7 +72,7 @@ class LiveDiagnostics:
 
         risk = taker.empirical_risk
         log.info(
-            "STRATEGIES | TAKER eq=%+.4f pending=%d completed=%d misses=%d rejected=%d attempts=%d miss_rate=%.1f%% empirical_reserve=%s/share | MAKER eq=%+.4f pending=%d placed=%d completed=%d one_sided=%d cancelled=%d | HYBRID eq=%+.4f pending=%d placed=%d completed=%d maker_only=%d maker+taker=%d taker_misses=%d one_sided=%d",
+            "TAKER | eq=%+.4f pending=%d completed=%d misses=%d rejected=%d attempts=%d miss_rate=%.1f%% empirical_reserve=%s/share",
             float(taker.total_pnl),
             taker.pending_count,
             taker.completed,
@@ -81,21 +81,52 @@ class LiveDiagnostics:
             risk.attempts,
             float(risk.miss_probability * Decimal("100")),
             self._fmt(risk.estimated_reserve_per_share if risk.attempts else None),
-            float(maker.total_pnl) if maker else 0.0,
-            maker.pending_count if maker else 0,
-            maker.placed if maker else 0,
-            maker.completed if maker else 0,
-            maker.one_sided_unwinds if maker else 0,
-            maker.cancelled if maker else 0,
-            float(hybrid.total_pnl) if hybrid else 0.0,
-            hybrid.pending_count if hybrid else 0,
-            hybrid.placed if hybrid else 0,
-            hybrid.completed if hybrid else 0,
-            hybrid.completed_both_maker if hybrid else 0,
-            hybrid.completed_with_taker if hybrid else 0,
-            hybrid.completion_misses if hybrid else 0,
-            hybrid.one_sided_unwinds if hybrid else 0,
         )
+
+        if research is not None:
+            for row in research.diagnostic_rows():
+                if row["mode"] == "MAKER":
+                    log.info(
+                        "%s | eq=%+.4f pending=%d placed=%d completed=%d inventory_exits=%d partial=%d cancelled=%d | avg_queue=%.1f avg_first_fill=%.0fms avg_interleg=%.0fms | inv_rate=%.1f%% avg_inv_loss=%s/share reserve=%s/share surge_skips=%d risk_skips=%d max_dd=%.4f",
+                        row["strategy"],
+                        float(row["equity"]),
+                        row["pending"],
+                        row["placed"],
+                        row["completed"],
+                        row["inventory_exits"],
+                        row["partial_exits"],
+                        row["cancelled"],
+                        float(row["avg_queue"]),
+                        float(row["avg_first_fill_ms"]),
+                        float(row["avg_interleg_ms"]),
+                        float(row["risk_probability"] * Decimal("100")),
+                        self._fmt(row["risk_loss_per_share"]),
+                        self._fmt(row["risk_reserve"]),
+                        row["surge_skips"],
+                        row["risk_skips"],
+                        float(row["max_drawdown"]),
+                    )
+                else:
+                    log.info(
+                        "%s | eq=%+.4f pending=%d placed=%d completed=%d inventory_exits=%d cancelled=%d | taker_complete=%d/%d misses=%d reprices=%d | avg_queue=%.1f inv_rate=%.1f%% avg_inv_loss=%s/share reserve=%s/share surge_skips=%d max_dd=%.4f",
+                        row["strategy"],
+                        float(row["equity"]),
+                        row["pending"],
+                        row["placed"],
+                        row["completed"],
+                        row["inventory_exits"],
+                        row["cancelled"],
+                        row["completion_successes"],
+                        row["completion_attempts"],
+                        row["completion_misses"],
+                        row["reprices"],
+                        float(row["avg_queue"]),
+                        float(row["risk_probability"] * Decimal("100")),
+                        self._fmt(row["risk_loss_per_share"]),
+                        self._fmt(row["risk_reserve"]),
+                        row["surge_skips"],
+                        float(row["max_drawdown"]),
+                    )
 
         ordered = sorted(
             engine.pairs.items(),
@@ -142,6 +173,14 @@ class LiveDiagnostics:
             quote_b = b.quote_buy(shares)
             ask_depth_a = a.asks.get(ask_a, ZERO)
             ask_depth_b = b.asks.get(ask_b, ZERO)
+            surge_text = "-"
+            if research is not None:
+                surge = research.regime.current(pair.market_id)
+                surge_text = (
+                    f"ON reasons={','.join(surge.reasons) or 'pause'} move1={float(surge.move_1s):.3f} move3={float(surge.move_3s):.3f} ups={surge.updates_per_second}"
+                    if surge.active
+                    else f"off move1={float(surge.move_1s):.3f} move3={float(surge.move_3s):.3f} ups={surge.updates_per_second}"
+                )
 
             if quote_a and quote_b:
                 fees = taker_fee(quote_a.segments, engine.settings.crypto_taker_fee_rate) + taker_fee(
@@ -152,7 +191,7 @@ class LiveDiagnostics:
                 net_edge = net / shares
                 executable_pair = (quote_a.notional + quote_b.notional) / shares
                 log.info(
-                    "%s %s %s | %s %s/%s ask_depth=%s | %s %s/%s ask_depth=%s | taker_pair=%s raw=%+.4f %ssh_VWAP=%s fees=%.4f risk=%.4f net=%+.4f/share | maker_bids=%s maker_edge=%s | best_taker_pair=%s best_raw=%s best_net=%s obs=%d",
+                    "%s %s %s | %s %s/%s ask_depth=%s | %s %s/%s ask_depth=%s | taker_pair=%s raw=%+.4f %ssh_VWAP=%s fees=%.4f risk=%.4f net=%+.4f/share | maker_bids=%s maker_edge=%s | SURGE=%s | best_taker_pair=%s best_raw=%s best_net=%s obs=%d",
                     phase.value,
                     pair.slug,
                     window_text,
@@ -173,6 +212,7 @@ class LiveDiagnostics:
                     float(net_edge),
                     self._fmt(maker_pair),
                     self._fmt_signed(maker_edge),
+                    surge_text,
                     self._fmt(stats.best_pair_price if stats else None),
                     self._fmt_signed(stats.best_raw_edge if stats else None),
                     self._fmt_signed(stats.best_net_edge if stats else None),
@@ -180,7 +220,7 @@ class LiveDiagnostics:
                 )
             else:
                 log.info(
-                    "%s %s %s | %s %s/%s %s %s/%s | taker_pair=%s raw=%+.4f | insufficient depth for %ssh | maker_bids=%s maker_edge=%s | best_taker_pair=%s obs=%d",
+                    "%s %s %s | %s %s/%s %s %s/%s | taker_pair=%s raw=%+.4f | insufficient depth for %ssh | maker_bids=%s maker_edge=%s | SURGE=%s | best_taker_pair=%s obs=%d",
                     phase.value,
                     pair.slug,
                     window_text,
@@ -195,6 +235,7 @@ class LiveDiagnostics:
                     self._fmt(shares),
                     self._fmt(maker_pair),
                     self._fmt_signed(maker_edge),
+                    surge_text,
                     self._fmt(stats.best_pair_price if stats else None),
                     stats.observations if stats else 0,
                 )
