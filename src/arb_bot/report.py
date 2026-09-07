@@ -71,14 +71,60 @@ def _flat_execution(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _flat_legacy_taker(payload: dict[str, Any], equity_after: Decimal) -> dict[str, Any]:
+    """Convert a Phase 1 legacy `shadow_result` into the report schema.
+
+    Phase 1 did not persist the richer detection/execution metadata now available
+    in Phase 1.2, so unavailable fields remain blank rather than being guessed.
+    """
+    return {
+        "strategy": "TAKER",
+        "finalized_at": None,
+        "slug": payload.get("slug"),
+        "status": payload.get("status"),
+        "action": payload.get("action"),
+        "shares": payload.get("shares"),
+        "detected_pair_price": None,
+        "detected_best_ask_a": None,
+        "detected_best_ask_b": None,
+        "execution_leg_a_avg": None,
+        "execution_leg_b_avg": None,
+        "execution_latency_ms": None,
+        "recovery_latency_ms": None,
+        "recovery_filled_leg": None,
+        "recovery_completion_avg": None,
+        "recovery_unwind_avg": None,
+        "realized_pnl": payload.get("pnl_usdc"),
+        "equity_after": equity_after,
+    }
+
+
 def build_report(path: Path) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     events = _load_rows(path)
     executions: list[dict[str, Any]] = []
+    has_modern_taker_summary = False
+
     for row in events:
         event_type = row.get("event_type")
         payload = row.get("payload")
         if event_type in SUMMARY_EVENT_TYPES and isinstance(payload, dict):
             executions.append(_flat_execution(str(event_type), payload))
+            if event_type == "taker_execution_summary":
+                has_modern_taker_summary = True
+
+    # Phase 1 wrote `shadow_result` but not `taker_execution_summary`. New
+    # Phase 1.2 writes both, so only use legacy rows when there are no modern
+    # taker summaries in the file; this prevents double-counting new runs.
+    if not has_modern_taker_summary:
+        legacy_equity = Decimal("0")
+        for row in events:
+            if row.get("event_type") != "shadow_result":
+                continue
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            legacy_equity += _d(payload.get("pnl_usdc"))
+            executions.append(_flat_legacy_taker(payload, legacy_equity))
 
     summary: dict[str, dict[str, Any]] = {}
     for strategy in ("TAKER", "MAKER", "HYBRID"):
