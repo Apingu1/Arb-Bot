@@ -49,41 +49,50 @@ async def run() -> None:
         shadow.process_due(engine.books)
         market_id = engine.apply_event(message)
         diagnostics.observe(message, market_id)
-        diagnostics.maybe_log(engine, shadow)
         if not market_id or not shadow.can_submit(market_id):
             return
         opportunity = engine.evaluate(market_id)
         if opportunity:
             shadow.submit(opportunity)
 
-    while True:
-        if settings.run_seconds and time.monotonic() - started >= settings.run_seconds:
-            break
-        try:
-            pairs = await discovery.discover()
-        except Exception as exc:
-            log.error("Market discovery failed: %s", exc)
-            await asyncio.sleep(5)
-            continue
-        if not pairs:
-            log.warning("No active BTC Up/Down markets found; retrying shortly")
-            await asyncio.sleep(min(settings.market_refresh_seconds, 15))
-            continue
-
-        engine.set_markets(pairs)
-        token_ids = [token for pair in pairs for token in (pair.token_a, pair.token_b)]
-        refresh = settings.market_refresh_seconds
-        if settings.run_seconds:
-            remaining = settings.run_seconds - (time.monotonic() - started)
-            refresh = max(0.1, min(refresh, remaining))
-        try:
-            await asyncio.wait_for(stream.run(token_ids, handle), timeout=refresh)
-        except TimeoutError:
+    async def diagnostic_loop() -> None:
+        while True:
+            await asyncio.sleep(settings.diagnostic_interval_seconds)
             shadow.process_due(engine.books)
             diagnostics.maybe_log(engine, shadow)
-            log.info("Refreshing active-market discovery")
-        except asyncio.CancelledError:
-            raise
+
+    diagnostic_task = asyncio.create_task(diagnostic_loop(), name="live-diagnostics")
+    try:
+        while True:
+            if settings.run_seconds and time.monotonic() - started >= settings.run_seconds:
+                break
+            try:
+                pairs = await discovery.discover()
+            except Exception as exc:
+                log.error("Market discovery failed: %s", exc)
+                await asyncio.sleep(5)
+                continue
+            if not pairs:
+                log.warning("No active BTC Up/Down markets found; retrying shortly")
+                await asyncio.sleep(min(settings.market_refresh_seconds, 15))
+                continue
+
+            engine.set_markets(pairs)
+            token_ids = [token for pair in pairs for token in (pair.token_a, pair.token_b)]
+            refresh = settings.market_refresh_seconds
+            if settings.run_seconds:
+                remaining = settings.run_seconds - (time.monotonic() - started)
+                refresh = max(0.1, min(refresh, remaining))
+            try:
+                await asyncio.wait_for(stream.run(token_ids, handle), timeout=refresh)
+            except TimeoutError:
+                shadow.process_due(engine.books)
+                log.info("Refreshing active-market discovery")
+            except asyncio.CancelledError:
+                raise
+    finally:
+        diagnostic_task.cancel()
+        await asyncio.gather(diagnostic_task, return_exceptions=True)
 
     shadow.process_due(engine.books)
     diagnostics.maybe_log(engine, shadow)
