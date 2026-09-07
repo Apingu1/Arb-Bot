@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from .config import Settings
 from .diagnostics import LiveDiagnostics
-from .discovery import MarketPhase, MarketDiscovery, market_phase, select_stream_pairs
+from .discovery import MarketPhase, MarketDiscovery, market_phase, select_live_and_next_pairs
 from .edge_tracker import EdgeTracker
 from .polymarket_ws import PolymarketMarketStream
 from .simulator import ShadowExecutor
@@ -107,7 +107,7 @@ async def run() -> None:
                 continue
 
             now_utc = datetime.now(timezone.utc)
-            stream_pairs = select_stream_pairs(pairs, now_utc)
+            stream_pairs = select_live_and_next_pairs(pairs, now_utc)
             live_pairs = [pair for pair in stream_pairs if market_phase(pair, now_utc) == MarketPhase.LIVE]
             next_pairs = [pair for pair in stream_pairs if market_phase(pair, now_utc) == MarketPhase.NEXT]
 
