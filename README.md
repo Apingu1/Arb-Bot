@@ -1,12 +1,12 @@
 # Arb-Bot — Phase 1 Shadow Arbitrage Engine
 
-Phase 1 is a **live-data research bot** for Polymarket BTC Up/Down binary markets. It watches the real CLOB order books, calculates fee- and depth-adjusted complete-set arbitrage, and simulates dual-leg execution after configurable latency.
+Phase 1 is a **live-data research bot** for Polymarket BTC Up/Down 15-minute binary markets. It watches the real CLOB order books, calculates fee- and depth-adjusted complete-set arbitrage, and simulates dual-leg execution after configurable latency.
 
 **It does not contain live order-placement code.** This is deliberate. The first objective is to establish whether the strategy has positive net expectancy after fees, depth, stale quotes, latency and one-leg misses.
 
 ## What Phase 1 does
 
-- Auto-discovers active BTC Up/Down binary markets through Polymarket Gamma search.
+- Discovers the recurring BTC 15-minute series using deterministic `btc-updown-15m-{unix_start}` event slugs, with Gamma public search retained as a fallback.
 - Subscribes to both outcome-token books on the official market WebSocket.
 - Maintains local full-depth books from snapshots and incremental price changes.
 - Prices every candidate size using actual executable depth, not best ask alone.
@@ -37,6 +37,34 @@ A trade is only shadow-submitted when both the minimum expected profit and minim
 ## Why this is safer than `YES + NO < 1`
 
 A displayed pair below $1 can still be a losing trade after taker fees, depth/slippage and execution risk. Phase 1 therefore walks the entire ask book and computes fees per fill level. It never assumes the top-of-book price is available for the full desired size.
+
+## BTC 15-minute discovery
+
+The recurring BTC series uses event slugs of the form:
+
+```text
+btc-updown-15m-{UTC_UNIX_INTERVAL_START}
+```
+
+The bot derives the current and nearby 15-minute slugs and fetches those events directly from Gamma. This avoids depending on public-search ranking.
+
+For this recurring series, expiry is derived from the slug itself:
+
+```text
+interval_start = unix timestamp encoded in slug
+interval_end   = interval_start + 900 seconds
+```
+
+This prevents calendar-day/event-level end-date values from incorrectly expiring a live 15-minute window.
+
+If zero markets are produced, discovery now logs a rejection summary and one compact market sample, e.g.:
+
+```text
+Discovery rejection summary: {'closed': 1, 'inactive': 8, 'missing_tokens': 1}
+Discovery sample market fields: {...}
+```
+
+That makes future Gamma/schema changes immediately diagnosable.
 
 ## Install
 
@@ -85,6 +113,20 @@ Results are written by default to `data/shadow_events.jsonl`.
 ## Output events
 
 The JSONL file contains `opportunity` records and `shadow_result` records. After a meaningful sample, evaluate opportunity frequency, both-fill rate, leg-miss rate, average win, average/max miss loss, cumulative P&L, drawdown, size sensitivity and latency sensitivity.
+
+## Tests
+
+The suite covers:
+
+- midpoint crypto fee math;
+- rejection of a 97c midpoint pair after taker fees;
+- acceptance of a sufficiently wide fee-adjusted pair;
+- full-depth sizing;
+- recurring BTC 15-minute slug alignment;
+- exact interval derivation from recurring slugs;
+- Gamma event-to-market parsing;
+- protection against day-level expiry values;
+- rejection of genuinely finished recurring windows.
 
 ## Safety / scope
 
