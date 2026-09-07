@@ -11,6 +11,7 @@ from .config import Settings
 from .discovery import MarketPhase, market_phase
 from .fees import taker_fee
 from .models import MarketPair
+from .orderbook import TokenBook
 from .storage import JsonlRecorder
 from .strategy import ArbitrageEngine
 from .strategy_metrics import StrategyEquity
@@ -44,10 +45,12 @@ class MakerCampaign:
 class MakerShadowEngine:
     """Conservative passive complete-set simulator.
 
-    Virtual orders rest at the observed best bids. A maker leg is only assumed
-    filled when the opposite ask trades/touches through the resting bid. This
-    intentionally under-counts fills because queue position is unknown; it
-    avoids assuming that every change at the best bid would have filled us.
+    Virtual orders rest at the observed best bids. A maker buy is only credited
+    when a *post-placement* `last_trade_price` event reports a SELL at or below
+    our bid with reported trade size at least as large as our simulated order.
+    Queue position is still unknowable, so this remains a shadow approximation,
+    but it is materially stronger than assuming that a transient crossed book
+    or a best-bid update filled us.
     """
 
     strategy_name = "MAKER"
@@ -90,12 +93,20 @@ class MakerShadowEngine:
                 continue
             pair = engine.pairs.get(market_id)
             if pair is None:
-                # The stream should process rollover before pruning books. If it
-                # does not, drop only fully unfilled campaigns; never invent a
-                # P&L for inventory whose book is unavailable.
                 if not campaign.filled_a and not campaign.filled_b:
                     self.cancelled += 1
                     self.campaigns.pop(market_id, None)
+                else:
+                    filled_price = campaign.fill_price_a if campaign.filled_a else campaign.fill_price_b
+                    assert filled_price is not None
+                    self.one_sided_unwinds += 1
+                    self._finalize(
+                        campaign,
+                        -(campaign.shares * filled_price),
+                        status="ONE_SIDED_MAKER_FILL",
+                        action="BOOK_PRUNED_WITH_OPEN_INVENTORY",
+                        extra={"reason": "BOOK_PRUNED", "filled_leg": "A" if campaign.filled_a else "B"},
+                    )
                 continue
 
             self._check_fills(engine, pair, campaign)
@@ -165,10 +176,21 @@ class MakerShadowEngine:
                 "maker_bid_b": bid_b,
                 "combined_bid_cost": pair_cost,
                 "gross_edge_per_share": gross_edge,
-                "fill_model": "ASK_TOUCH_OR_CROSS",
+                "fill_model": "POST_PLACEMENT_SELL_TRADE_AT_OR_BELOW_BID_SIZE_GTE_ORDER",
                 "order_ttl_ms": self.settings.maker_order_ttl_ms,
                 "inventory_timeout_ms": self.settings.maker_inventory_timeout_ms,
             },
+        )
+
+    @staticmethod
+    def _trade_fills(book: TokenBook, *, bid: Decimal, shares: Decimal, placed_at: float) -> bool:
+        return (
+            book.last_trade_monotonic >= placed_at
+            and book.last_trade_side == "SELL"
+            and book.last_trade_price is not None
+            and book.last_trade_price <= bid
+            and book.last_trade_size is not None
+            and book.last_trade_size >= shares
         )
 
     def _check_fills(self, engine: ArbitrageEngine, pair: MarketPair, campaign: MakerCampaign) -> None:
@@ -178,21 +200,21 @@ class MakerShadowEngine:
             return
         now = time.monotonic()
 
-        if not campaign.filled_a:
-            ask_a = a.best_ask()
-            if ask_a is not None and ask_a <= campaign.bid_a:
-                campaign.filled_a = True
-                campaign.fill_price_a = campaign.bid_a
-                campaign.first_fill_at = campaign.first_fill_at or now
-                self._record_fill(campaign, "A", campaign.bid_a)
+        if not campaign.filled_a and self._trade_fills(
+            a, bid=campaign.bid_a, shares=campaign.shares, placed_at=campaign.placed_at
+        ):
+            campaign.filled_a = True
+            campaign.fill_price_a = campaign.bid_a
+            campaign.first_fill_at = campaign.first_fill_at or now
+            self._record_fill(campaign, "A", campaign.bid_a, a)
 
-        if not campaign.filled_b:
-            ask_b = b.best_ask()
-            if ask_b is not None and ask_b <= campaign.bid_b:
-                campaign.filled_b = True
-                campaign.fill_price_b = campaign.bid_b
-                campaign.first_fill_at = campaign.first_fill_at or now
-                self._record_fill(campaign, "B", campaign.bid_b)
+        if not campaign.filled_b and self._trade_fills(
+            b, bid=campaign.bid_b, shares=campaign.shares, placed_at=campaign.placed_at
+        ):
+            campaign.filled_b = True
+            campaign.fill_price_b = campaign.bid_b
+            campaign.first_fill_at = campaign.first_fill_at or now
+            self._record_fill(campaign, "B", campaign.bid_b, b)
 
         if campaign.filled_a and campaign.filled_b:
             assert campaign.fill_price_a is not None and campaign.fill_price_b is not None
@@ -206,7 +228,7 @@ class MakerShadowEngine:
                 extra={"maker_fee": ZERO},
             )
 
-    def _record_fill(self, campaign: MakerCampaign, leg: str, price: Decimal) -> None:
+    def _record_fill(self, campaign: MakerCampaign, leg: str, price: Decimal, book: TokenBook) -> None:
         self.recorder.write(
             "maker_leg_fill",
             {
@@ -216,7 +238,11 @@ class MakerShadowEngine:
                 "slug": campaign.slug,
                 "leg": leg,
                 "shares": campaign.shares,
-                "price": price,
+                "maker_price": price,
+                "confirming_trade_price": book.last_trade_price,
+                "confirming_trade_size": book.last_trade_size,
+                "confirming_trade_side": book.last_trade_side,
+                "confirming_trade_timestamp": book.last_trade_timestamp,
                 "maker_fee": ZERO,
             },
         )
