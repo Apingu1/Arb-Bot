@@ -94,6 +94,11 @@ def classify_btc_15m_slug(slug: str | None, now: datetime | None = None) -> Mark
     return MarketPhase.FUTURE
 
 
+# Backward-compatible helper name used by the edge tracker and older callers.
+def market_phase(slug: str | None, now: datetime | None = None) -> MarketPhase:
+    return classify_btc_15m_slug(slug, now)
+
+
 def btc_15m_candidate_slugs(
     now: datetime | None = None,
     *,
