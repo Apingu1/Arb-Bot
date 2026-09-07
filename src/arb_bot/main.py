@@ -8,6 +8,7 @@ import httpx
 from dotenv import load_dotenv
 
 from .config import Settings
+from .diagnostics import LiveDiagnostics
 from .discovery import MarketDiscovery
 from .polymarket_ws import PolymarketMarketStream
 from .simulator import ShadowExecutor
@@ -40,12 +41,15 @@ async def run() -> None:
     discovery = MarketDiscovery(settings.gamma_url, settings.market_query)
     engine = ArbitrageEngine(settings)
     shadow = ShadowExecutor(settings, recorder)
+    diagnostics = LiveDiagnostics(settings.diagnostic_interval_seconds)
     stream = PolymarketMarketStream(settings.websocket_url)
     started = time.monotonic()
 
     async def handle(message: dict) -> None:
         shadow.process_due(engine.books)
         market_id = engine.apply_event(message)
+        diagnostics.observe(message, market_id)
+        diagnostics.maybe_log(engine, shadow)
         if not market_id or not shadow.can_submit(market_id):
             return
         opportunity = engine.evaluate(market_id)
@@ -76,11 +80,13 @@ async def run() -> None:
             await asyncio.wait_for(stream.run(token_ids, handle), timeout=refresh)
         except TimeoutError:
             shadow.process_due(engine.books)
+            diagnostics.maybe_log(engine, shadow)
             log.info("Refreshing active-market discovery")
         except asyncio.CancelledError:
             raise
 
     shadow.process_due(engine.books)
+    diagnostics.maybe_log(engine, shadow)
     log.info("Finished shadow run: pnl=%+.4f completed=%d leg_misses=%d rejected=%d", float(shadow.total_pnl), shadow.completed, shadow.leg_misses, shadow.rejected)
 
 
