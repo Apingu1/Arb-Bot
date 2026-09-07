@@ -47,6 +47,17 @@ class ArbitrageEngine:
                     continue
                 book.apply_change(str(change.get("side") or ""), str(change.get("price") or "0"), str(change.get("size") or "0"), timestamp)
                 touched_market = self.token_to_pair.get(token) or touched_market
+        elif event_type == "last_trade_price":
+            token = str(event.get("asset_id") or "")
+            book = self.books.get(token)
+            if book and event.get("price") is not None:
+                book.apply_trade(
+                    str(event.get("price")),
+                    None if event.get("size") is None else str(event.get("size")),
+                    str(event.get("side") or ""),
+                    timestamp,
+                )
+                touched_market = self.token_to_pair.get(token)
         return touched_market
 
     def evaluate(self, market_id: str) -> Opportunity | None:
