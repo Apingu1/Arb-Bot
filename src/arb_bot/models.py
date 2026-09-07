@@ -52,6 +52,9 @@ class Opportunity:
     expected_net_profit: Decimal
     expected_net_edge_per_share: Decimal
     detected_monotonic: float
+    detected_at_utc: str | None = None
+    detected_best_ask_a: Decimal | None = None
+    detected_best_ask_b: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
