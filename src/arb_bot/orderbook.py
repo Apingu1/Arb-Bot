@@ -17,6 +17,11 @@ class TokenBook:
         self.updated_monotonic: float = 0.0
         self.exchange_timestamp: str | None = None
         self.ready = False
+        self.last_trade_price: Decimal | None = None
+        self.last_trade_size: Decimal | None = None
+        self.last_trade_side: str | None = None
+        self.last_trade_monotonic: float = 0.0
+        self.last_trade_timestamp: str | None = None
 
     def apply_snapshot(self, bids: list[dict], asks: list[dict], timestamp: str | None = None) -> None:
         self.bids = self._levels_to_dict(bids)
@@ -35,6 +40,13 @@ class TokenBook:
             levels[px] = qty
         self.exchange_timestamp = timestamp
         self.updated_monotonic = time.monotonic()
+
+    def apply_trade(self, price: str, size: str | None, side: str, timestamp: str | None = None) -> None:
+        self.last_trade_price = Decimal(str(price))
+        self.last_trade_size = Decimal(str(size)) if size not in {None, ""} else None
+        self.last_trade_side = str(side or "").upper()
+        self.last_trade_timestamp = timestamp
+        self.last_trade_monotonic = time.monotonic()
 
     @staticmethod
     def _levels_to_dict(levels: list[dict]) -> dict[Decimal, Decimal]:
