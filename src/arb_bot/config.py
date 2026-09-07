@@ -22,6 +22,12 @@ def _bool(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _decimal_tuple(name: str, default: str) -> tuple[Decimal, ...]:
+    raw = _env(name, default)
+    values = [Decimal(part.strip()) for part in raw.split(",") if part.strip()]
+    return tuple(values)
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     market_query: str = field(default_factory=lambda: _env("MARKET_QUERY", "BTC Up or Down 15m"))
@@ -39,17 +45,41 @@ class Settings:
     diagnostic_interval_seconds: int = field(default_factory=lambda: _int("DIAGNOSTIC_INTERVAL_SECONDS", 10))
     edge_record_min_interval_ms: int = field(default_factory=lambda: _int("EDGE_RECORD_MIN_INTERVAL_MS", 0))
 
+    # Phase 1.3 maker research. The old single MAKER/HYBRID classes remain in
+    # the repository as the Phase 1.2 checkpoint, but the live harness uses the
+    # queue-aware variant suite below.
     maker_enabled: bool = field(default_factory=lambda: _bool("MAKER_SHADOW_ENABLED", True))
     maker_trade_shares: Decimal = field(default_factory=lambda: _decimal("MAKER_TRADE_SHARES", "5"))
+    maker_variant_targets: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("MAKER_VARIANT_TARGETS", "0.99,0.98,0.97,0.96")
+    )
+    maker_tick_size: Decimal = field(default_factory=lambda: _decimal("MAKER_TICK_SIZE", "0.01"))
     maker_min_gross_edge_per_share: Decimal = field(default_factory=lambda: _decimal("MAKER_MIN_GROSS_EDGE_PER_SHARE", "0.005"))
-    maker_order_ttl_ms: int = field(default_factory=lambda: _int("MAKER_ORDER_TTL_MS", 1500))
-    maker_inventory_timeout_ms: int = field(default_factory=lambda: _int("MAKER_INVENTORY_TIMEOUT_MS", 2500))
+    maker_max_quote_age_ms: int = field(default_factory=lambda: _int("MAKER_MAX_QUOTE_AGE_MS", 30000))
+    maker_reprice_ticks: int = field(default_factory=lambda: _int("MAKER_REPRICE_TICKS", 2))
+    maker_requote_cooldown_ms: int = field(default_factory=lambda: _int("MAKER_REQUOTE_COOLDOWN_MS", 500))
+    maker_inventory_timeout_ms: int = field(default_factory=lambda: _int("MAKER_INVENTORY_TIMEOUT_MS", 5000))
+    maker_min_seconds_to_expiry: int = field(default_factory=lambda: _int("MAKER_MIN_SECONDS_TO_EXPIRY", 30))
+    maker_use_empirical_risk_gate: bool = field(default_factory=lambda: _bool("MAKER_USE_EMPIRICAL_RISK_GATE", False))
+    maker_empirical_risk_min_samples: int = field(default_factory=lambda: _int("MAKER_EMPIRICAL_RISK_MIN_SAMPLES", 20))
 
     hybrid_enabled: bool = field(default_factory=lambda: _bool("HYBRID_SHADOW_ENABLED", True))
     hybrid_trade_shares: Decimal = field(default_factory=lambda: _decimal("HYBRID_TRADE_SHARES", "5"))
     hybrid_min_net_edge_per_share: Decimal = field(default_factory=lambda: _decimal("HYBRID_MIN_NET_EDGE_PER_SHARE", "0.003"))
     hybrid_completion_latency_ms: int = field(default_factory=lambda: _int("HYBRID_COMPLETION_LATENCY_MS", 100))
-    hybrid_inventory_timeout_ms: int = field(default_factory=lambda: _int("HYBRID_INVENTORY_TIMEOUT_MS", 2500))
+    hybrid_inventory_timeout_ms: int = field(default_factory=lambda: _int("HYBRID_INVENTORY_TIMEOUT_MS", 5000))
+    hybrid_max_hold_loss_per_share: Decimal = field(default_factory=lambda: _decimal("HYBRID_MAX_HOLD_LOSS_PER_SHARE", "0.02"))
+    hybrid_min_reprice_interval_ms: int = field(default_factory=lambda: _int("HYBRID_MIN_REPRICE_INTERVAL_MS", 500))
+
+    # SURGE / toxic-flow gate. A maker variant pauses new exposure when any
+    # configured short-horizon condition is met. Existing one-sided inventory
+    # is still actively managed rather than abandoned.
+    surge_move_1s: Decimal = field(default_factory=lambda: _decimal("SURGE_MOVE_1S", "0.04"))
+    surge_move_3s: Decimal = field(default_factory=lambda: _decimal("SURGE_MOVE_3S", "0.08"))
+    surge_updates_per_second: int = field(default_factory=lambda: _int("SURGE_UPDATES_PER_SECOND", 300))
+    surge_pause_ms: int = field(default_factory=lambda: _int("SURGE_PAUSE_MS", 1500))
+    surge_one_sided_window_seconds: int = field(default_factory=lambda: _int("SURGE_ONE_SIDED_WINDOW_SECONDS", 30))
+    surge_one_sided_count: int = field(default_factory=lambda: _int("SURGE_ONE_SIDED_COUNT", 3))
 
     empirical_risk_min_samples: int = field(default_factory=lambda: _int("EMPIRICAL_RISK_MIN_SAMPLES", 20))
     use_empirical_risk_reserve: bool = field(default_factory=lambda: _bool("USE_EMPIRICAL_RISK_RESERVE", False))
