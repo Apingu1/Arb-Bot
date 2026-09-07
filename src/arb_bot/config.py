@@ -32,9 +32,18 @@ def _int_tuple(name: str, default: str) -> tuple[int, ...]:
     return tuple(int(part.strip()) for part in raw.split(",") if part.strip())
 
 
+def _str_tuple(name: str, default: str) -> tuple[str, ...]:
+    raw = _env(name, default)
+    return tuple(part.strip().upper() for part in raw.split(",") if part.strip())
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
-    market_query: str = field(default_factory=lambda: _env("MARKET_QUERY", "BTC Up or Down 15m"))
+    market_query: str = field(default_factory=lambda: _env("MARKET_QUERY", "Up or Down 15m"))
+    market_assets: tuple[str, ...] = field(
+        default_factory=lambda: _str_tuple("MARKET_ASSETS", "BTC,ETH,HYPE,BNB,DOGE,XRP,SOL")
+    )
+    market_lookahead_intervals: int = field(default_factory=lambda: _int("MARKET_LOOKAHEAD_INTERVALS", 2))
     min_net_edge_per_share: Decimal = field(default_factory=lambda: _decimal("MIN_NET_EDGE_PER_SHARE", "0.005"))
     min_expected_profit_usdc: Decimal = field(default_factory=lambda: _decimal("MIN_EXPECTED_PROFIT_USDC", "0.10"))
     min_trade_shares: Decimal = field(default_factory=lambda: _decimal("MIN_TRADE_SHARES", "5"))
@@ -144,8 +153,6 @@ class Settings:
     split_sell_min_seconds_to_expiry: int = field(default_factory=lambda: _int("SPLIT_SELL_MIN_SECONDS_TO_EXPIRY", 30))
 
     # Phase 1.6: non-directional dual-FOK execution frontier.
-    # The first and second individual FOKs are simulated independently; no
-    # cross-order atomicity is assumed. Net edge is measured after taker fees.
     dual_fok_enabled: bool = field(default_factory=lambda: _bool("DUAL_FOK_ENABLED", True))
     dual_fok_base_latency_ms: int = field(default_factory=lambda: _int("DUAL_FOK_BASE_LATENCY_MS", 25))
     dual_fok_recovery_latency_ms: int = field(default_factory=lambda: _int("DUAL_FOK_RECOVERY_LATENCY_MS", 50))
@@ -180,12 +187,21 @@ class Settings:
         default_factory=lambda: _int_tuple("DUAL_FOK_STABILITY_PERIODS_MS", "0,25,50,100,250")
     )
 
-    # Reverse complete-set research assumes the UP+DOWN inventory already exists
-    # before the opportunity, avoiding any hidden on-chain split latency.
     reverse_dual_fok_enabled: bool = field(default_factory=lambda: _bool("REVERSE_DUAL_FOK_ENABLED", True))
     reverse_dual_fok_skews_ms: tuple[int, ...] = field(
         default_factory=lambda: _int_tuple("REVERSE_DUAL_FOK_SKEWS_MS", "0,25,50")
     )
+
+    # Phase 1.7: live retro terminal dashboard. The headline balance is an
+    # aggregate of independent shadow-model P&L and is labelled accordingly.
+    dashboard_enabled: bool = field(default_factory=lambda: _bool("DASHBOARD_ENABLED", True))
+    dashboard_host: str = field(default_factory=lambda: _env("DASHBOARD_HOST", "0.0.0.0"))
+    dashboard_port: int = field(default_factory=lambda: _int("DASHBOARD_PORT", 8765))
+    dashboard_refresh_ms: int = field(default_factory=lambda: _int("DASHBOARD_REFRESH_MS", 500))
+    dashboard_state_path: str = field(default_factory=lambda: _env("DASHBOARD_STATE_PATH", "data/dashboard_state.json"))
+    dashboard_event_limit: int = field(default_factory=lambda: _int("DASHBOARD_EVENT_LIMIT", 80))
+    dashboard_major_loss_usdc: Decimal = field(default_factory=lambda: _decimal("DASHBOARD_MAJOR_LOSS_USDC", "0.25"))
+    dashboard_major_win_usdc: Decimal = field(default_factory=lambda: _decimal("DASHBOARD_MAJOR_WIN_USDC", "0.10"))
 
     empirical_risk_min_samples: int = field(default_factory=lambda: _int("EMPIRICAL_RISK_MIN_SAMPLES", 20))
     use_empirical_risk_reserve: bool = field(default_factory=lambda: _bool("USE_EMPIRICAL_RISK_RESERVE", False))
