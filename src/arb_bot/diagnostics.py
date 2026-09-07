@@ -42,7 +42,17 @@ class LiveDiagnostics:
     def due(self) -> bool:
         return time.monotonic() - self.last_log >= self.interval_seconds
 
-    def maybe_log(self, engine: ArbitrageEngine, taker, edge_tracker: EdgeTracker, *, research=None, hedge=None) -> None:
+    def maybe_log(
+        self,
+        engine: ArbitrageEngine,
+        taker,
+        edge_tracker: EdgeTracker,
+        *,
+        research=None,
+        hedge=None,
+        frontier=None,
+        split_sell=None,
+    ) -> None:
         now = time.monotonic()
         if now - self.last_log < self.interval_seconds:
             return
@@ -152,6 +162,61 @@ class LiveDiagnostics:
                     float(row["extreme_pnl"]),
                     row["surge_skips"],
                     row["no_hedgeable_quote"],
+                    float(row["max_drawdown"]),
+                )
+
+        if frontier is not None:
+            for row in frontier.diagnostic_rows():
+                reasons = row.get("cancel_reasons") or {}
+                reason_text = ",".join(f"{k}:{v}" for k, v in sorted(reasons.items())) or "-"
+                log.info(
+                    "%s | eq=%+.4f placed=%d fill=%d p_fill=%.2f%% hedge=%d/%d p_h|f=%.2f%% | G=%dms S=%s qcons=%.1f%% | model_EV=%+.5f real_EV=%+.5f | ghost_fill=%d/%d ghost_target=%d | cancel={%s}",
+                    row["strategy"],
+                    float(row["equity"]),
+                    row["placed"],
+                    row["maker_fills"],
+                    float(row["p_fill"] * Decimal("100")),
+                    row["hedge_successes"],
+                    row["hedge_attempts"],
+                    float(row["p_hedge_given_fill"] * Decimal("100")),
+                    row["grace_ms"],
+                    self._fmt(row["fixed_size"]),
+                    float(row["avg_cancel_queue_consumed"] * Decimal("100")),
+                    float(row["modeled_ev_per_placement"]),
+                    float(row["realized_ev_per_placement"]),
+                    row["ghost_filled"],
+                    row["ghost_created"],
+                    row["ghost_target_profitable"],
+                    reason_text,
+                )
+            ranked = frontier.ranked_rows()
+            if ranked:
+                top = ranked[:3]
+                log.info(
+                    "EV FRONTIER TOP | %s",
+                    " | ".join(
+                        f"{row['strategy']} model={float(row['modeled_ev_per_placement']):+.5f} real={float(row['realized_ev_per_placement']):+.5f}"
+                        for row in top
+                    ),
+                )
+
+        if split_sell is not None:
+            for row in split_sell.diagnostic_rows():
+                log.info(
+                    "%s | eq=%+.4f pending=%d placed=%d first_fill=%d completed=%d residual=%d cancelled=%d | p_fill=%.2f%% p_complete|fill=%.2f%% avg_queue=%.1f avg_fill=%.0fms EV/place=%+.5f max_dd=%.4f",
+                    row["strategy"],
+                    float(row["equity"]),
+                    row["pending"],
+                    row["placed"],
+                    row["first_fill_campaigns"],
+                    row["completed"],
+                    row["residual_exits"],
+                    row["cancelled"],
+                    float(row["p_fill"] * Decimal("100")),
+                    float(row["p_complete_given_fill"] * Decimal("100")),
+                    float(row["avg_queue"]),
+                    float(row["avg_first_fill_ms"]),
+                    float(row["ev_per_placement"]),
                     float(row["max_drawdown"]),
                 )
 
