@@ -14,6 +14,7 @@ DEFAULT_PROFILE: dict[str, set[str]] = {
     "MAKER-98": set(),
     "MAKER-97": set(),
     "MAKER-96": set(),
+    "PMAKER-Q25": set(),
     "PMAKER-Q50": set(),
     "PMAKER-Q100": {"BTC", "ETH"},
     "PMAKER-Q250": {"ETH"},
