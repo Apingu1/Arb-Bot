@@ -10,10 +10,9 @@ from .atomic_benchmark import (
     IdealAtomicBenchmarkSuite,
     IdealAtomicVariant,
     _quote_payload,
-    _size_code,
     _utc_now,
 )
-from .discovery import asset_from_slug
+from .discovery import MarketPhase, asset_from_slug, market_phase
 from .storage import JsonlRecorder
 from .strategy import ArbitrageEngine
 
@@ -23,12 +22,13 @@ ATOMIC_LATENCY_CHECKPOINTS_MS = (1, 2, 5, 10, 25, 50, 100)
 
 
 class IdealAtomicVariantV182(IdealAtomicVariant):
-    """Ideal atomic control with observational latency-survival checkpoints.
+    """Ideal atomic control with local-book latency-survival checkpoints.
 
-    A checkpoint is recorded at the first market update observed at or after the
-    target latency while the same complete-set snapshot remains fee-adjusted
-    positive. ``actual_elapsed_ms`` is always stored so delayed observations are
-    visible rather than silently treated as exact-latency executions.
+    This remains benchmark-only. While an ideal window is active, the normal
+    strategy timer re-evaluates the same fee-adjusted complete-set opportunity
+    at approximately 1/2/5/10/25/50/100 ms. Every checkpoint stores the actual
+    elapsed time so scheduler delay is visible rather than silently treated as
+    an exact-latency execution.
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -76,6 +76,7 @@ class IdealAtomicVariantV182(IdealAtomicVariant):
                     "quote_a": _quote_payload(metrics["quote_a"]),
                     "quote_b": _quote_payload(metrics["quote_b"]),
                     "taker_fee_paid": metrics["fee_a"] + metrics["fee_b"],
+                    "source": "LOCAL_BOOK_TIMER_REPLAY",
                 },
             )
 
@@ -142,6 +143,31 @@ class IdealAtomicVariantV182(IdealAtomicVariant):
                 "phase182_latency_instrumented": True,
             },
         )
+
+    def process_due(self, engine: ArbitrageEngine) -> None:
+        # Unlike the historical ideal benchmark, Phase 1.8.2 actively samples
+        # open ideal windows on the normal ~1 ms strategy timer. This is still
+        # a local-book replay, not proof of exchange-side executable latency.
+        now = time.monotonic()
+        for market_id in list(self.active):
+            pair = engine.pairs.get(market_id)
+            if pair is None or market_phase(pair) != MarketPhase.LIVE:
+                self._close(market_id, now, "WINDOW_ROLLOVER")
+                continue
+
+            metrics = self._snapshot(engine, market_id, now)
+            if metrics is None:
+                self._close(market_id, now, "BOOK_NOT_REPLAYABLE")
+                continue
+            if metrics["edge"] < self.settings.atomic_min_net_edge_per_share:
+                self._close(market_id, now, "NO_LONGER_POSITIVE_TIMER_REPLAY")
+                continue
+
+            window = self.active.get(market_id)
+            if window is None:
+                continue
+            window.peak_edge = max(window.peak_edge, metrics["edge"])
+            self._sample_latency(market_id, now, metrics)
 
     def _close(self, market_id: str, now: float, reason: str) -> None:
         super()._close(market_id, now, reason)
