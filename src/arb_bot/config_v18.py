@@ -8,20 +8,19 @@ from .config import Settings, _bool, _decimal, _decimal_tuple, _int, _str_tuple
 
 @dataclass(frozen=True, slots=True)
 class SettingsV18(Settings):
-    """Phase 1.8 evidence-gated defaults.
+    """Phase 1.8 strengthened defaults with runtime model×asset control.
 
-    Phase 1.8 uses its own V18_* environment namespace so a user's existing
-    Phase 1.7 .env cannot silently re-enable retired models or restore the old
-    5-share/100ms Hybrid settings.
+    Historical maker-family engines remain instantiated so ARB//TERM can turn
+    them on and off at runtime. The UI runtime control matrix is authoritative
+    for whether a specific model may start a campaign on a specific asset.
     """
 
-    # Legacy TAKER has not produced a true complete-set win in supplied evidence.
     taker_enabled: bool = field(default_factory=lambda: _bool("V18_TAKER_ENABLED", False))
 
-    # Standard MAKER-99/98/97/96 are retired from the active experiment.
-    maker_enabled: bool = field(default_factory=lambda: _bool("V18_MAKER_ENABLED", False))
+    # Keep engines internally available; runtime controls determine activity.
+    maker_enabled: bool = field(default_factory=lambda: _bool("V18_MAKER_ENGINE_AVAILABLE", True))
     maker_variant_targets: tuple[Decimal, ...] = field(
-        default_factory=lambda: _decimal_tuple("V18_HYBRID_TARGETS", "0.99,0.98")
+        default_factory=lambda: _decimal_tuple("V18_HYBRID_TARGETS", "0.99,0.98,0.97,0.96")
     )
     maker_use_empirical_risk_gate: bool = field(
         default_factory=lambda: _bool("V18_EMPIRICAL_RISK_GATE", True)
@@ -30,9 +29,7 @@ class SettingsV18(Settings):
         default_factory=lambda: _int("V18_EMPIRICAL_RISK_MIN_SAMPLES", 3)
     )
 
-    # HYBRID-99/98 produced true maker+taker complete-set wins. Reduce exposure,
-    # complete faster, and cut one-sided inventory sooner.
-    hybrid_enabled: bool = field(default_factory=lambda: _bool("V18_HYBRID_ENABLED", True))
+    hybrid_enabled: bool = field(default_factory=lambda: _bool("V18_HYBRID_ENGINE_AVAILABLE", True))
     hybrid_trade_shares: Decimal = field(default_factory=lambda: _decimal("V18_HYBRID_TRADE_SHARES", "1"))
     hybrid_min_net_edge_per_share: Decimal = field(
         default_factory=lambda: _decimal("V18_HYBRID_MIN_NET_EDGE_PER_SHARE", "0.005")
@@ -50,8 +47,7 @@ class SettingsV18(Settings):
         default_factory=lambda: _int("V18_HYBRID_MIN_REPRICE_INTERVAL_MS", 100)
     )
 
-    # PMAKER-Q100/Q250 produced true BOTH_MAKER_FILLED wins; Q25/Q50 did not.
-    paired_maker_enabled: bool = field(default_factory=lambda: _bool("V18_PMAKER_ENABLED", True))
+    paired_maker_enabled: bool = field(default_factory=lambda: _bool("V18_PMAKER_ENGINE_AVAILABLE", True))
     paired_maker_trade_shares: Decimal = field(
         default_factory=lambda: _decimal("V18_PMAKER_TRADE_SHARES", "1")
     )
@@ -62,18 +58,18 @@ class SettingsV18(Settings):
         default_factory=lambda: _decimal("V18_PMAKER_MIN_GROSS_EDGE_PER_SHARE", "0.010")
     )
     paired_maker_max_queues: tuple[Decimal, ...] = field(
-        default_factory=lambda: _decimal_tuple("V18_PMAKER_MAX_QUEUES", "100,250")
+        default_factory=lambda: _decimal_tuple("V18_PMAKER_MAX_QUEUES", "25,50,100,250")
     )
     paired_maker_max_queue_imbalance: Decimal = field(
         default_factory=lambda: _decimal("V18_PMAKER_MAX_QUEUE_IMBALANCE", "2")
     )
 
-    # All supplied true complete-set wins are ETH. Later evidence can widen this.
+    # Kept for backward compatibility; runtime controls now decide exact assets.
     winner_assets: tuple[str, ...] = field(
-        default_factory=lambda: _str_tuple("V18_WINNER_ASSETS", "ETH")
+        default_factory=lambda: _str_tuple("V18_WINNER_ASSETS", "BTC,ETH,BNB,SOL")
     )
 
-    # Winless historical families remain in the repository but are inactive.
+    # Non-maker historical families remain inactive in this UI-control pass.
     hedge_enabled: bool = field(default_factory=lambda: _bool("V18_HEDGE_ENABLED", False))
     hedge_ghost_enabled: bool = field(default_factory=lambda: _bool("V18_HEDGE_GHOST_ENABLED", False))
     ev_frontier_enabled: bool = field(default_factory=lambda: _bool("V18_EV_ENABLED", False))
@@ -83,7 +79,6 @@ class SettingsV18(Settings):
         default_factory=lambda: _bool("V18_RFOK_ENABLED", False)
     )
 
-    # ATOMIC stays on because it is a benchmark ceiling, not executable P&L.
     atomic_benchmark_enabled: bool = field(
         default_factory=lambda: _bool("V18_ATOMIC_BENCHMARK_ENABLED", True)
     )
