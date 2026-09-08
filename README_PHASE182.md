@@ -9,25 +9,27 @@ It deliberately does **not** change order placement rules, selective thresholds,
 For SHYB / SPMAKER / SMAKER variants the runtime now records:
 
 - quoted maker gross edge at placement;
+- a comparable hypothetical maker-first/taker-second edge at placement for both possible first-fill sides;
 - time from quote placement to first fill;
 - fee-adjusted hedgeable complete-set edge at first fill;
-- deterioration from quoted maker gross edge to hedgeable edge at first fill;
+- deterioration from the comparable placement edge to the actual first-fill edge;
 - first-fill-to-finalization time;
 - total campaign age at finalization;
-- post-fill hedgeable edge checkpoints at approximately 25, 50, 100, 250 and 500 ms while residual inventory remains.
+- post-fill hedgeable edge checkpoints at approximately 10, 25, 50, 100, 250 and 500 ms while residual inventory remains.
 
 New event types:
 
+- `maker_variant_placement_edge_v182`
 - `maker_variant_first_fill_timing_v182`
 - `maker_variant_post_fill_edge_sample`
 
-Execution summaries are enriched with `first_fill_to_finalize_ms`, `campaign_age_ms`, and `post_fill_edge_timeline` when available.
+Execution summaries are enriched with `first_fill_to_finalize_ms`, `campaign_age_ms`, `placement_edge_context_v182`, and `post_fill_edge_timeline` when available.
 
 ## Ideal atomic timing telemetry
 
 The ideal atomic benchmark remains explicitly non-executable and excluded from shadow P&L.
 
-Each ideal capture now tracks whether the same fee-adjusted complete-set opportunity is still observed at/after approximate latency checkpoints:
+Each ideal capture is re-evaluated on the normal ~1 ms strategy timer to see whether the same fee-adjusted complete-set opportunity is still present in the bot's local books at approximate latency checkpoints:
 
 - 1 ms
 - 2 ms
@@ -37,7 +39,7 @@ Each ideal capture now tracks whether the same fee-adjusted complete-set opportu
 - 50 ms
 - 100 ms
 
-Every sample stores both the requested checkpoint and the **actual observed elapsed time**. This avoids pretending a delayed book update occurred at an exact latency.
+Every sample stores both the requested checkpoint and the **actual observed elapsed time**. This avoids pretending scheduler timing was exact. It is a local-book latency replay, not proof that exchange-side execution would have succeeded at that latency.
 
 New event type:
 
@@ -53,7 +55,7 @@ Heartbeat atomic diagnostics now include survival counts such as `1ms:5/7` along
 2. **SELECTIVE POST-FILL EDGE TRAJECTORY** — observed hedgeable edge at the post-fill checkpoints.
 3. **SELECTIVE OUTCOME QUALITY** — separates complete-set wins, profitable non-complete outcomes, negative outcomes and flats.
 4. **ATOMIC IDEAL-FILL TIMING** — p50/p90/max lifetime plus observed survival percentages at 1/2/5/10/25/50 ms. Existing historical lifetime events are included.
-5. **ATOMIC LATENCY REPLAY** — Phase 1.8.2-only observed checkpoint survival and median remaining edge.
+5. **ATOMIC LATENCY REPLAY** — Phase 1.8.2-only local-book checkpoint survival and median remaining edge.
 
 BUY and SELL atomic rows remain mirrored benchmark views and must not be added together as independent opportunities.
 
