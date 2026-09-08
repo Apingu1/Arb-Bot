@@ -15,6 +15,15 @@ class SettingsV184(SettingsV181):
     exchange order placement is still not implemented by this repository.
     """
 
+    # Do not place a selective resting order when the current maker-first / 
+    # taker-second economics are already as toxic as the cancellation boundary.
+    v184_placement_edge_gate_enabled: bool = field(
+        default_factory=lambda: _bool("V184_PLACEMENT_EDGE_GATE_ENABLED", True)
+    )
+    v184_placement_min_edge_per_share: Decimal = field(
+        default_factory=lambda: _decimal("V184_PLACEMENT_MIN_EDGE_PER_SHARE", "-0.005")
+    )
+
     v184_fast_cancel_enabled: bool = field(
         default_factory=lambda: _bool("V184_FAST_CANCEL_ENABLED", True)
     )
@@ -38,6 +47,14 @@ class SettingsV184(SettingsV181):
     )
     v184_prefill_history_max_samples: int = field(
         default_factory=lambda: _int("V184_PREFILL_HISTORY_MAX_SAMPLES", 512)
+    )
+
+    # The legacy maker base waited 500 ms after every cancellation. Once the
+    # placement edge gate is active, 50 ms is sufficient to avoid immediately
+    # recycling a rejected/stale quote while allowing much faster re-entry when
+    # the book genuinely becomes attractive again.
+    maker_requote_cooldown_ms: int = field(
+        default_factory=lambda: _int("V184_MAKER_REQUOTE_COOLDOWN_MS", 50)
     )
 
     # Make the post-first-fill shadow actions materially faster so the report
