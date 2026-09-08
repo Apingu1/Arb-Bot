@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from . import main as _base
-from .config_v18 import SettingsV18
+from .config_v181 import SettingsV181
 from .dashboard_v18 import DashboardServerV18, DashboardStateV18
 from .simulator import ShadowExecutor
-from .winner_research_v18 import WinnerResearchSuiteV18
+from .winner_research_v181 import WinnerResearchSuiteV181
 
 
 class InactiveTakerExecutor(ShadowExecutor):
@@ -23,10 +23,10 @@ class InactiveTakerExecutor(ShadowExecutor):
 
 
 def cli() -> None:
-    # Reuse stable Phase 1.7 orchestration but inject Phase 1.8 settings,
-    # runtime-controlled maker research and the writable ARB//TERM dashboard.
-    _base.Settings = SettingsV18
-    _base.MakerResearchSuite = WinnerResearchSuiteV18
+    # Reuse stable Phase 1.7 orchestration while injecting Phase 1.8.1
+    # runtime-controlled selective maker research.
+    _base.Settings = SettingsV181
+    _base.MakerResearchSuite = WinnerResearchSuiteV181
     _base.ShadowExecutor = InactiveTakerExecutor
     _base.DashboardState = DashboardStateV18
     _base.DashboardServer = DashboardServerV18
