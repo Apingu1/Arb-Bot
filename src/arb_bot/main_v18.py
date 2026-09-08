@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from . import main as _base
 from .config_v18 import SettingsV18
+from .dashboard_v18 import DashboardServerV18, DashboardStateV18
 from .simulator import ShadowExecutor
 from .winner_research_v18 import WinnerResearchSuiteV18
 
 
 class InactiveTakerExecutor(ShadowExecutor):
-    """Keep diagnostics compatibility while disabling the winless legacy TAKER."""
+    """Keep diagnostics compatibility while disabling legacy TAKER by default."""
 
     strategy_name = "TAKER-INACTIVE"
 
@@ -22,12 +23,13 @@ class InactiveTakerExecutor(ShadowExecutor):
 
 
 def cli() -> None:
-    # Reuse the stable Phase 1.7 orchestration while replacing only the runtime
-    # configuration and maker research suite. This keeps discovery/dashboard/
-    # recording behavior identical to the accepted 1.7 experiment surface.
+    # Reuse stable Phase 1.7 orchestration but inject Phase 1.8 settings,
+    # runtime-controlled maker research and the writable ARB//TERM dashboard.
     _base.Settings = SettingsV18
     _base.MakerResearchSuite = WinnerResearchSuiteV18
     _base.ShadowExecutor = InactiveTakerExecutor
+    _base.DashboardState = DashboardStateV18
+    _base.DashboardServer = DashboardServerV18
     _base.cli()
 
 
