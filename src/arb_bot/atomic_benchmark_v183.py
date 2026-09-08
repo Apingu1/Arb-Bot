@@ -196,6 +196,12 @@ class IdealAtomicBenchmarkSuiteV183:
     def diagnostic_rows(self) -> list[dict[str, Any]]:
         return [variant.diagnostic_row() for variant in self.variants]
 
+    def asset_rows(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for variant in self.variants:
+            rows.extend(variant.asset_rows())
+        return rows
+
 
 def log_atomic_diagnostics_v183(suite: IdealAtomicBenchmarkSuiteV183) -> None:
     for row in suite.diagnostic_rows():
