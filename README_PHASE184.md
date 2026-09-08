@@ -17,9 +17,27 @@ Phase 1.8.3 showed that the main selective-maker failure occurs at the first fil
 
 Phase 1.8.4 therefore focuses on avoiding bad first fills and measuring a more realistic fast complete-set execution frontier.
 
-## 1. Fast pre-fill cancellation
+## 1. Safe fast entry
 
-Selective maker campaigns now continuously evaluate the economics of either resting leg filling first.
+Before a selective maker campaign is placed, Phase 1.8.4 evaluates the current maker-first/taker-second economics for **both** possible first-fill sides using the full configured shadow size.
+
+By default it refuses to place when:
+
+- either missing-leg full-size taker quote is unavailable;
+- the worst current completion edge is `<= -0.005/share`;
+- either order book is already `>= 250 ms` old.
+
+Rejected candidates emit:
+
+- `maker_variant_placement_reject_v184`
+
+This is important because the previous engine could place a quote and only discover a few milliseconds later that completing the other leg was already toxic.
+
+The legacy maker base also imposed a `500 ms` re-quote cooldown after cancellation. Phase 1.8.4 reduces this to `50 ms`, while the placement edge gate prevents the faster re-entry from simply recycling the same toxic quote.
+
+## 2. Fast pre-fill cancellation
+
+Selective maker campaigns continuously evaluate the economics of either resting leg filling first after placement.
 
 Default cancellation conditions:
 
@@ -42,13 +60,13 @@ New events:
 - `maker_variant_fast_cancel_effective_v184`
 - `maker_variant_fast_cancel_race_lost_v184`
 
-## 2. Timer-enforced quote-age guard
+## 3. Timer-enforced quote-age guard
 
 The edge sampler caches unchanged book states so the hot path does not repeatedly recompute identical quotes.
 
 Quote age still advances even when no new market-data message arrives. Phase 1.8.4 therefore evaluates the 500 ms stale rule and the 1,000 ms hard quote-age rule independently on the normal strategy timer. A quiet websocket period cannot leave a stale selective maker quote resting indefinitely.
 
-## 3. Pre-fill edge timeline
+## 4. Pre-fill edge timeline
 
 For every selective first fill, Phase 1.8.4 stores the most recent observable edge for the side that later filled first at approximately:
 
@@ -68,10 +86,11 @@ New events:
 
 The actual future first-fill side is used only for retrospective diagnosis. It is not an executable side-selection signal.
 
-## 4. Faster post-fill research defaults
+## 5. Faster post-fill research defaults
 
 Phase 1.8.4 reduces the simulated delays that Phase 1.8.3 evidence showed were too slow:
 
+- maker re-quote cooldown after cancellation: `50 ms` (previously `500 ms`);
 - hybrid taker-completion latency: `5 ms`;
 - hybrid missing-leg reprice interval: `25 ms`;
 - hybrid inventory timeout: `500 ms`;
@@ -80,7 +99,7 @@ Phase 1.8.4 reduces the simulated delays that Phase 1.8.3 evidence showed were t
 
 These are research/shadow timings. They are not claims about achievable exchange-side latency.
 
-## 5. Atomic execution proxy
+## 6. Atomic execution proxy
 
 The ideal atomic benchmark remains intact, but Phase 1.8.4 adds a stricter local-book execution proxy.
 
@@ -112,7 +131,7 @@ New event:
 
 This remains a local-book shadow proxy. It does not prove simultaneous exchange fills, network acknowledgement, order matching priority or zero leg risk.
 
-## 6. Report additions
+## 7. Report additions
 
 `arb-report` keeps the existing Phase 1.8.3 report and appends:
 
@@ -126,11 +145,15 @@ Use the existing session filter:
 arb-report --session
 ```
 
-The Phase 1.8.4 events also carry the Phase 1.8.3 process run id so the existing session filter remains compatible.
+The Phase 1.8.4 first-fill/cancellation events also carry the Phase 1.8.3 process run id so the existing session filter remains compatible.
 
 ## Key environment overrides
 
 ```bash
+V184_PLACEMENT_EDGE_GATE_ENABLED=true
+V184_PLACEMENT_MIN_EDGE_PER_SHARE=-0.005
+V184_MAKER_REQUOTE_COOLDOWN_MS=50
+
 V184_FAST_CANCEL_ENABLED=true
 V184_PREFILL_CANCEL_EDGE_PER_SHARE=-0.005
 V184_STALE_QUOTE_AGE_MS=500
@@ -181,7 +204,7 @@ arb-report --session --asset DOGE
 
 Phase 1.8.4 should answer two practical questions:
 
-1. Can a realistic cancellation latency prevent enough toxic first fills without cancelling too many genuine winners?
+1. Can safe entry plus a realistic cancellation latency prevent enough toxic first fills without filtering/cancelling too many genuine winners?
 2. Does positive atomic P&L survive full-size depth, fees, book freshness and 2/5/10 ms end-to-end latency replay?
 
-If maker cancellation remains unable to rescue expectancy while the atomic proxy remains positive, the next phase should prioritise the atomic/dual-order execution architecture rather than adding more maker parameter variants.
+If maker protection remains unable to rescue expectancy while the atomic proxy remains positive, the next phase should prioritise the atomic/dual-order execution architecture rather than adding more maker parameter variants.
