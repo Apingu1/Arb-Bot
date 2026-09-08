@@ -13,6 +13,7 @@ from arb_bot.models import MarketPair
 from arb_bot.selective_research_v184 import SelectivePairedMakerVariantV184
 from arb_bot.storage import JsonlRecorder
 from arb_bot.strategy import ArbitrageEngine
+from arb_bot.winner_research_v184 import GuardedSelectivePairedMakerVariantV184
 
 
 def _pair() -> MarketPair:
@@ -118,6 +119,42 @@ def test_v184_fill_can_beat_slow_cancel(tmp_path, monkeypatch):
     assert len(race) == 1
     assert race[0]["payload"]["reason"] == "TOXIC_EDGE"
     assert any(row["event_type"] == "maker_variant_prefill_timeline_v184" for row in rows)
+
+
+def test_v184_hard_quote_age_fires_without_new_book_update(tmp_path, monkeypatch):
+    monkeypatch.setattr(maker_base, "market_phase", lambda pair: maker_base.MarketPhase.LIVE)
+    settings = SettingsV184(
+        maker_min_seconds_to_expiry=0,
+        maker_use_empirical_risk_gate=False,
+        v184_cancel_latency_ms=0,
+        v184_stale_quote_age_ms=500,
+        v184_hard_quote_age_ms=1000,
+    )
+    path = tmp_path / "age.jsonl"
+    variant = GuardedSelectivePairedMakerVariantV184(
+        settings,
+        JsonlRecorder(str(path)),
+        MarketRegimeTracker(settings),
+        max_pair=Decimal("0.97"),
+        max_queue=Decimal("10"),
+    )
+    engine = _engine(settings)
+
+    variant.on_market_update(engine, "m-live", SurgeSnapshot(False, ()))
+    campaign = variant.campaigns["m-live"]
+    # No book update occurs after placement; advance only the campaign age.
+    campaign.placed_at -= 1.100
+
+    variant.process_due(engine)
+    assert "m-live" not in variant.campaigns
+    rows = _events(path)
+    intent = next(
+        row["payload"]
+        for row in rows
+        if row["event_type"] == "maker_variant_fast_cancel_intent_v184"
+    )
+    assert intent["reason"] == "HARD_QUOTE_AGE"
+    assert any(row["event_type"] == "maker_variant_fast_cancel_effective_v184" for row in rows)
 
 
 def test_v184_atomic_proxy_requotes_full_size_after_latency(tmp_path, monkeypatch):
