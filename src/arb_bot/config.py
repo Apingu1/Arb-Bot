@@ -44,16 +44,16 @@ class Settings:
         default_factory=lambda: _str_tuple("MARKET_ASSETS", "BTC,ETH,HYPE,BNB,DOGE,XRP,SOL")
     )
     market_lookahead_intervals: int = field(default_factory=lambda: _int("MARKET_LOOKAHEAD_INTERVALS", 2))
-    min_net_edge_per_share: Decimal = field(default_factory=lambda: _decimal("MIN_NET_EDGE_PER_SHARE", "0.005"))
-    min_expected_profit_usdc: Decimal = field(default_factory=lambda: _decimal("MIN_EXPECTED_PROFIT_USDC", "0.10"))
-    min_trade_shares: Decimal = field(default_factory=lambda: _decimal("MIN_TRADE_SHARES", "5"))
-    max_trade_shares: Decimal = field(default_factory=lambda: _decimal("MAX_TRADE_SHARES", "100"))
+    min_net_edge_per_share: Decimal = field(default_factory=lambda: _decimal("MIN_NET_EDGE_PER_SHARE", "0.001"))
+    min_expected_profit_usdc: Decimal = field(default_factory=lambda: _decimal("MIN_EXPECTED_PROFIT_USDC", "0.001"))
+    min_trade_shares: Decimal = field(default_factory=lambda: _decimal("MIN_TRADE_SHARES", "1"))
+    max_trade_shares: Decimal = field(default_factory=lambda: _decimal("MAX_TRADE_SHARES", "5"))
     risk_buffer_per_share: Decimal = field(default_factory=lambda: _decimal("RISK_BUFFER_PER_SHARE", "0.002"))
     recovery_penalty_per_share: Decimal = field(default_factory=lambda: _decimal("RECOVERY_PENALTY_PER_SHARE", "0.002"))
-    shadow_latency_ms: int = field(default_factory=lambda: _int("SHADOW_LATENCY_MS", 200))
-    shadow_recovery_latency_ms: int = field(default_factory=lambda: _int("SHADOW_RECOVERY_LATENCY_MS", 100))
-    market_cooldown_ms: int = field(default_factory=lambda: _int("MARKET_COOLDOWN_MS", 1000))
-    max_book_age_ms: int = field(default_factory=lambda: _int("MAX_BOOK_AGE_MS", 1500))
+    shadow_latency_ms: int = field(default_factory=lambda: _int("SHADOW_LATENCY_MS", 5))
+    shadow_recovery_latency_ms: int = field(default_factory=lambda: _int("SHADOW_RECOVERY_LATENCY_MS", 10))
+    market_cooldown_ms: int = field(default_factory=lambda: _int("MARKET_COOLDOWN_MS", 100))
+    max_book_age_ms: int = field(default_factory=lambda: _int("MAX_BOOK_AGE_MS", 250))
     market_refresh_seconds: int = field(default_factory=lambda: _int("MARKET_REFRESH_SECONDS", 60))
     diagnostic_interval_seconds: int = field(default_factory=lambda: _int("DIAGNOSTIC_INTERVAL_SECONDS", 10))
     edge_record_min_interval_ms: int = field(default_factory=lambda: _int("EDGE_RECORD_MIN_INTERVAL_MS", 0))
@@ -152,44 +152,44 @@ class Settings:
     split_sell_requote_cooldown_ms: int = field(default_factory=lambda: _int("SPLIT_SELL_REQUOTE_COOLDOWN_MS", 500))
     split_sell_min_seconds_to_expiry: int = field(default_factory=lambda: _int("SPLIT_SELL_MIN_SECONDS_TO_EXPIRY", 30))
 
-    # Phase 1.6: non-directional dual-FOK execution frontier.
+    # Phase 1.7: accelerated non-directional dual-FOK execution frontier.
     dual_fok_enabled: bool = field(default_factory=lambda: _bool("DUAL_FOK_ENABLED", True))
-    dual_fok_base_latency_ms: int = field(default_factory=lambda: _int("DUAL_FOK_BASE_LATENCY_MS", 25))
-    dual_fok_recovery_latency_ms: int = field(default_factory=lambda: _int("DUAL_FOK_RECOVERY_LATENCY_MS", 50))
-    dual_fok_cooldown_ms: int = field(default_factory=lambda: _int("DUAL_FOK_COOLDOWN_MS", 1000))
-    dual_fok_max_book_age_ms: int = field(default_factory=lambda: _int("DUAL_FOK_MAX_BOOK_AGE_MS", 250))
+    dual_fok_base_latency_ms: int = field(default_factory=lambda: _int("DUAL_FOK_BASE_LATENCY_MS", 2))
+    dual_fok_recovery_latency_ms: int = field(default_factory=lambda: _int("DUAL_FOK_RECOVERY_LATENCY_MS", 10))
+    dual_fok_cooldown_ms: int = field(default_factory=lambda: _int("DUAL_FOK_COOLDOWN_MS", 100))
+    dual_fok_max_book_age_ms: int = field(default_factory=lambda: _int("DUAL_FOK_MAX_BOOK_AGE_MS", 100))
     dual_fok_use_surge_gate: bool = field(default_factory=lambda: _bool("DUAL_FOK_USE_SURGE_GATE", True))
     dual_fok_leg_order: str = field(default_factory=lambda: _env("DUAL_FOK_LEG_ORDER", "fragile_first"))
 
-    dual_fok_primary_size: Decimal = field(default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_SIZE", "5"))
+    dual_fok_primary_size: Decimal = field(default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_SIZE", "1"))
     dual_fok_primary_edge_target: Decimal = field(
-        default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_EDGE_TARGET", "0.005")
+        default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_EDGE_TARGET", "0.001")
     )
-    dual_fok_primary_skew_ms: int = field(default_factory=lambda: _int("DUAL_FOK_PRIMARY_SKEW_MS", 25))
+    dual_fok_primary_skew_ms: int = field(default_factory=lambda: _int("DUAL_FOK_PRIMARY_SKEW_MS", 2))
     dual_fok_primary_coverage_multiple: Decimal = field(
         default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_COVERAGE_MULTIPLE", "2")
     )
-    dual_fok_primary_stability_ms: int = field(default_factory=lambda: _int("DUAL_FOK_PRIMARY_STABILITY_MS", 50))
+    dual_fok_primary_stability_ms: int = field(default_factory=lambda: _int("DUAL_FOK_PRIMARY_STABILITY_MS", 0))
 
     dual_fok_skews_ms: tuple[int, ...] = field(
-        default_factory=lambda: _int_tuple("DUAL_FOK_SKEWS_MS", "0,10,25,50,100,200")
+        default_factory=lambda: _int_tuple("DUAL_FOK_SKEWS_MS", "0,1,2,5,10,25")
     )
     dual_fok_size_candidates: tuple[Decimal, ...] = field(
-        default_factory=lambda: _decimal_tuple("DUAL_FOK_SIZE_CANDIDATES", "1,5,10,20")
+        default_factory=lambda: _decimal_tuple("DUAL_FOK_SIZE_CANDIDATES", "1,2,5,10")
     )
     dual_fok_edge_targets: tuple[Decimal, ...] = field(
-        default_factory=lambda: _decimal_tuple("DUAL_FOK_EDGE_TARGETS", "0.005,0.010,0.015,0.020,0.030")
+        default_factory=lambda: _decimal_tuple("DUAL_FOK_EDGE_TARGETS", "0.001,0.002,0.003,0.005,0.010")
     )
     dual_fok_coverage_multiples: tuple[Decimal, ...] = field(
         default_factory=lambda: _decimal_tuple("DUAL_FOK_COVERAGE_MULTIPLES", "1,2,5")
     )
     dual_fok_stability_periods_ms: tuple[int, ...] = field(
-        default_factory=lambda: _int_tuple("DUAL_FOK_STABILITY_PERIODS_MS", "0,25,50,100,250")
+        default_factory=lambda: _int_tuple("DUAL_FOK_STABILITY_PERIODS_MS", "0,2,5,10,25,50")
     )
 
     reverse_dual_fok_enabled: bool = field(default_factory=lambda: _bool("REVERSE_DUAL_FOK_ENABLED", True))
     reverse_dual_fok_skews_ms: tuple[int, ...] = field(
-        default_factory=lambda: _int_tuple("REVERSE_DUAL_FOK_SKEWS_MS", "0,25,50")
+        default_factory=lambda: _int_tuple("REVERSE_DUAL_FOK_SKEWS_MS", "0,1,2,5,10,25")
     )
 
     # Phase 1.7: live retro terminal dashboard. The headline balance is an
