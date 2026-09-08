@@ -21,8 +21,8 @@ dev = [
 ]
 
 [project.scripts]
-arb-bot = "arb_bot.main_v182:cli"
-arb-report = "arb_bot.report_v182:cli"
+arb-bot = "arb_bot.main_v183:cli"
+arb-report = "arb_bot.report_v183_cli:cli"
 arb-ui = "arb_bot.dashboard_v17_cli:cli"
 
 [tool.setuptools.packages.find]
