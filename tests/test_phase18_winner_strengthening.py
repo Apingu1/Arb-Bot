@@ -5,33 +5,49 @@ from pathlib import Path
 
 from arb_bot.config_v18 import SettingsV18
 from arb_bot.report_v18 import build_compact
+from arb_bot.runtime_controls_v18 import RuntimeControlsV18
 from arb_bot.storage import JsonlRecorder
 from arb_bot.winner_research_v18 import WinnerResearchSuiteV18
 
 
-def test_v18_ignores_stale_phase17_enable_flags(monkeypatch):
-    monkeypatch.setenv("MAKER_SHADOW_ENABLED", "true")
+def test_v18_ignores_stale_phase17_flags(monkeypatch):
     monkeypatch.setenv("HEDGE_SHADOW_ENABLED", "true")
     monkeypatch.setenv("EV_FRONTIER_ENABLED", "true")
     monkeypatch.setenv("DUAL_FOK_ENABLED", "true")
     monkeypatch.setenv("HYBRID_TRADE_SHARES", "5")
 
     settings = SettingsV18()
-    assert settings.maker_enabled is False
+    assert settings.maker_enabled is True  # engine available; runtime matrix gates it
     assert settings.hedge_enabled is False
     assert settings.ev_frontier_enabled is False
     assert settings.dual_fok_enabled is False
     assert str(settings.hybrid_trade_shares) == "1"
-    assert settings.winner_assets == ("ETH",)
 
 
-def test_v18_only_instantiates_observed_winner_variants(tmp_path: Path):
+def test_v18_instantiates_runtime_controllable_maker_family(tmp_path: Path):
     settings = SettingsV18()
     recorder = JsonlRecorder(str(tmp_path / "events.jsonl"))
     suite = WinnerResearchSuiteV18(settings, recorder)
     names = {variant.strategy_name for variant in suite.variants}
-    assert names == {"HYBRID-99", "HYBRID-98", "PMAKER-Q100", "PMAKER-Q250"}
-    assert suite.makers == []
+    assert names == {
+        "MAKER-99", "MAKER-98", "MAKER-97", "MAKER-96",
+        "HYBRID-99", "HYBRID-98", "HYBRID-97", "HYBRID-96",
+        "PMAKER-Q25", "PMAKER-Q50", "PMAKER-Q100", "PMAKER-Q250",
+    }
+
+
+def test_runtime_controls_are_model_asset_specific():
+    controls = RuntimeControlsV18()
+    controls.configure(["HYBRID-99", "PMAKER-Q100"])
+    assert controls.enabled_for("HYBRID-99", "BTC")
+    assert controls.enabled_for("HYBRID-99", "ETH")
+    assert not controls.enabled_for("HYBRID-99", "SOL")
+    controls.set_asset("HYBRID-99", "SOL", True)
+    assert controls.enabled_for("HYBRID-99", "SOL")
+    controls.set_asset("HYBRID-99", "BTC", False)
+    assert not controls.enabled_for("HYBRID-99", "BTC")
+    controls.set_model("PMAKER-Q100", False)
+    assert not controls.model_enabled("PMAKER-Q100")
 
 
 def test_compact_report_counts_only_true_complete_set_wins(tmp_path: Path):
