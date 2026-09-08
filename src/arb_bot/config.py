@@ -54,11 +54,12 @@ class Settings:
     shadow_recovery_latency_ms: int = field(default_factory=lambda: _int("SHADOW_RECOVERY_LATENCY_MS", 10))
     market_cooldown_ms: int = field(default_factory=lambda: _int("MARKET_COOLDOWN_MS", 100))
     max_book_age_ms: int = field(default_factory=lambda: _int("MAX_BOOK_AGE_MS", 250))
+    strategy_timer_interval_ms: int = field(default_factory=lambda: _int("STRATEGY_TIMER_INTERVAL_MS", 1))
     market_refresh_seconds: int = field(default_factory=lambda: _int("MARKET_REFRESH_SECONDS", 60))
     diagnostic_interval_seconds: int = field(default_factory=lambda: _int("DIAGNOSTIC_INTERVAL_SECONDS", 10))
     edge_record_min_interval_ms: int = field(default_factory=lambda: _int("EDGE_RECORD_MIN_INTERVAL_MS", 0))
 
-    # Phase 1.3 queue-aware maker benchmarks remain active as controls.
+    # Phase 1.3 queue-aware maker benchmarks remain active as historical controls.
     maker_enabled: bool = field(default_factory=lambda: _bool("MAKER_SHADOW_ENABLED", True))
     maker_trade_shares: Decimal = field(default_factory=lambda: _decimal("MAKER_TRADE_SHARES", "5"))
     maker_variant_targets: tuple[Decimal, ...] = field(
@@ -74,6 +75,22 @@ class Settings:
     maker_min_seconds_to_expiry: int = field(default_factory=lambda: _int("MAKER_MIN_SECONDS_TO_EXPIRY", 30))
     maker_use_empirical_risk_gate: bool = field(default_factory=lambda: _bool("MAKER_USE_EMPIRICAL_RISK_GATE", False))
     maker_empirical_risk_min_samples: int = field(default_factory=lambda: _int("MAKER_EMPIRICAL_RISK_MIN_SAMPLES", 20))
+
+    # Phase 1.7 selective paired-maker controls. These only join existing best
+    # bids when the complete-set pair is already cheap enough and both queues
+    # satisfy the configured queue/imbalance gates.
+    paired_maker_enabled: bool = field(default_factory=lambda: _bool("PAIRED_MAKER_ENABLED", True))
+    paired_maker_trade_shares: Decimal = field(default_factory=lambda: _decimal("PAIRED_MAKER_TRADE_SHARES", "1"))
+    paired_maker_target_pair: Decimal = field(default_factory=lambda: _decimal("PAIRED_MAKER_TARGET_PAIR", "0.99"))
+    paired_maker_min_gross_edge_per_share: Decimal = field(
+        default_factory=lambda: _decimal("PAIRED_MAKER_MIN_GROSS_EDGE_PER_SHARE", "0.005")
+    )
+    paired_maker_max_queues: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("PAIRED_MAKER_MAX_QUEUES", "25,50,100,250")
+    )
+    paired_maker_max_queue_imbalance: Decimal = field(
+        default_factory=lambda: _decimal("PAIRED_MAKER_MAX_QUEUE_IMBALANCE", "4")
+    )
 
     hybrid_enabled: bool = field(default_factory=lambda: _bool("HYBRID_SHADOW_ENABLED", True))
     hybrid_trade_shares: Decimal = field(default_factory=lambda: _decimal("HYBRID_TRADE_SHARES", "5"))
@@ -192,8 +209,22 @@ class Settings:
         default_factory=lambda: _int_tuple("REVERSE_DUAL_FOK_SKEWS_MS", "0,1,2,5,10,25")
     )
 
-    # Phase 1.7: live retro terminal dashboard. The headline balance is an
-    # aggregate of independent shadow-model P&L and is labelled accordingly.
+    # Ideal instantaneous benchmark. It includes protocol taker fees but assumes
+    # zero inter-leg latency / no leg risk. It never contributes to shadow equity.
+    atomic_benchmark_enabled: bool = field(default_factory=lambda: _bool("ATOMIC_BENCHMARK_ENABLED", True))
+    atomic_reverse_enabled: bool = field(default_factory=lambda: _bool("ATOMIC_REVERSE_ENABLED", True))
+    atomic_sizes: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("ATOMIC_SIZES", "1,5,10,20")
+    )
+    atomic_min_net_edge_per_share: Decimal = field(
+        default_factory=lambda: _decimal("ATOMIC_MIN_NET_EDGE_PER_SHARE", "0.0001")
+    )
+    atomic_edge_bands: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("ATOMIC_EDGE_BANDS", "0.001,0.002,0.003,0.005,0.010")
+    )
+    atomic_max_book_age_ms: int = field(default_factory=lambda: _int("ATOMIC_MAX_BOOK_AGE_MS", 100))
+
+    # Phase 1.7 live retro terminal dashboard.
     dashboard_enabled: bool = field(default_factory=lambda: _bool("DASHBOARD_ENABLED", True))
     dashboard_host: str = field(default_factory=lambda: _env("DASHBOARD_HOST", "0.0.0.0"))
     dashboard_port: int = field(default_factory=lambda: _int("DASHBOARD_PORT", 8765))
