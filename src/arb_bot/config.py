@@ -32,24 +32,34 @@ def _int_tuple(name: str, default: str) -> tuple[int, ...]:
     return tuple(int(part.strip()) for part in raw.split(",") if part.strip())
 
 
+def _str_tuple(name: str, default: str) -> tuple[str, ...]:
+    raw = _env(name, default)
+    return tuple(part.strip().upper() for part in raw.split(",") if part.strip())
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
-    market_query: str = field(default_factory=lambda: _env("MARKET_QUERY", "BTC Up or Down 15m"))
-    min_net_edge_per_share: Decimal = field(default_factory=lambda: _decimal("MIN_NET_EDGE_PER_SHARE", "0.005"))
-    min_expected_profit_usdc: Decimal = field(default_factory=lambda: _decimal("MIN_EXPECTED_PROFIT_USDC", "0.10"))
-    min_trade_shares: Decimal = field(default_factory=lambda: _decimal("MIN_TRADE_SHARES", "5"))
-    max_trade_shares: Decimal = field(default_factory=lambda: _decimal("MAX_TRADE_SHARES", "100"))
+    market_query: str = field(default_factory=lambda: _env("MARKET_QUERY", "Up or Down 15m"))
+    market_assets: tuple[str, ...] = field(
+        default_factory=lambda: _str_tuple("MARKET_ASSETS", "BTC,ETH,HYPE,BNB,DOGE,XRP,SOL")
+    )
+    market_lookahead_intervals: int = field(default_factory=lambda: _int("MARKET_LOOKAHEAD_INTERVALS", 2))
+    min_net_edge_per_share: Decimal = field(default_factory=lambda: _decimal("MIN_NET_EDGE_PER_SHARE", "0.001"))
+    min_expected_profit_usdc: Decimal = field(default_factory=lambda: _decimal("MIN_EXPECTED_PROFIT_USDC", "0.001"))
+    min_trade_shares: Decimal = field(default_factory=lambda: _decimal("MIN_TRADE_SHARES", "1"))
+    max_trade_shares: Decimal = field(default_factory=lambda: _decimal("MAX_TRADE_SHARES", "5"))
     risk_buffer_per_share: Decimal = field(default_factory=lambda: _decimal("RISK_BUFFER_PER_SHARE", "0.002"))
     recovery_penalty_per_share: Decimal = field(default_factory=lambda: _decimal("RECOVERY_PENALTY_PER_SHARE", "0.002"))
-    shadow_latency_ms: int = field(default_factory=lambda: _int("SHADOW_LATENCY_MS", 200))
-    shadow_recovery_latency_ms: int = field(default_factory=lambda: _int("SHADOW_RECOVERY_LATENCY_MS", 100))
-    market_cooldown_ms: int = field(default_factory=lambda: _int("MARKET_COOLDOWN_MS", 1000))
-    max_book_age_ms: int = field(default_factory=lambda: _int("MAX_BOOK_AGE_MS", 1500))
+    shadow_latency_ms: int = field(default_factory=lambda: _int("SHADOW_LATENCY_MS", 5))
+    shadow_recovery_latency_ms: int = field(default_factory=lambda: _int("SHADOW_RECOVERY_LATENCY_MS", 10))
+    market_cooldown_ms: int = field(default_factory=lambda: _int("MARKET_COOLDOWN_MS", 100))
+    max_book_age_ms: int = field(default_factory=lambda: _int("MAX_BOOK_AGE_MS", 250))
+    strategy_timer_interval_ms: int = field(default_factory=lambda: _int("STRATEGY_TIMER_INTERVAL_MS", 1))
     market_refresh_seconds: int = field(default_factory=lambda: _int("MARKET_REFRESH_SECONDS", 60))
     diagnostic_interval_seconds: int = field(default_factory=lambda: _int("DIAGNOSTIC_INTERVAL_SECONDS", 10))
     edge_record_min_interval_ms: int = field(default_factory=lambda: _int("EDGE_RECORD_MIN_INTERVAL_MS", 0))
 
-    # Phase 1.3 queue-aware maker benchmarks remain active as controls.
+    # Phase 1.3 queue-aware maker benchmarks remain active as historical controls.
     maker_enabled: bool = field(default_factory=lambda: _bool("MAKER_SHADOW_ENABLED", True))
     maker_trade_shares: Decimal = field(default_factory=lambda: _decimal("MAKER_TRADE_SHARES", "5"))
     maker_variant_targets: tuple[Decimal, ...] = field(
@@ -65,6 +75,22 @@ class Settings:
     maker_min_seconds_to_expiry: int = field(default_factory=lambda: _int("MAKER_MIN_SECONDS_TO_EXPIRY", 30))
     maker_use_empirical_risk_gate: bool = field(default_factory=lambda: _bool("MAKER_USE_EMPIRICAL_RISK_GATE", False))
     maker_empirical_risk_min_samples: int = field(default_factory=lambda: _int("MAKER_EMPIRICAL_RISK_MIN_SAMPLES", 20))
+
+    # Phase 1.7 selective paired-maker controls. These only join existing best
+    # bids when the complete-set pair is already cheap enough and both queues
+    # satisfy the configured queue/imbalance gates.
+    paired_maker_enabled: bool = field(default_factory=lambda: _bool("PAIRED_MAKER_ENABLED", True))
+    paired_maker_trade_shares: Decimal = field(default_factory=lambda: _decimal("PAIRED_MAKER_TRADE_SHARES", "1"))
+    paired_maker_target_pair: Decimal = field(default_factory=lambda: _decimal("PAIRED_MAKER_TARGET_PAIR", "0.99"))
+    paired_maker_min_gross_edge_per_share: Decimal = field(
+        default_factory=lambda: _decimal("PAIRED_MAKER_MIN_GROSS_EDGE_PER_SHARE", "0.005")
+    )
+    paired_maker_max_queues: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("PAIRED_MAKER_MAX_QUEUES", "25,50,100,250")
+    )
+    paired_maker_max_queue_imbalance: Decimal = field(
+        default_factory=lambda: _decimal("PAIRED_MAKER_MAX_QUEUE_IMBALANCE", "4")
+    )
 
     hybrid_enabled: bool = field(default_factory=lambda: _bool("HYBRID_SHADOW_ENABLED", True))
     hybrid_trade_shares: Decimal = field(default_factory=lambda: _decimal("HYBRID_TRADE_SHARES", "5"))
@@ -143,49 +169,70 @@ class Settings:
     split_sell_requote_cooldown_ms: int = field(default_factory=lambda: _int("SPLIT_SELL_REQUOTE_COOLDOWN_MS", 500))
     split_sell_min_seconds_to_expiry: int = field(default_factory=lambda: _int("SPLIT_SELL_MIN_SECONDS_TO_EXPIRY", 30))
 
-    # Phase 1.6: non-directional dual-FOK execution frontier.
-    # The first and second individual FOKs are simulated independently; no
-    # cross-order atomicity is assumed. Net edge is measured after taker fees.
+    # Phase 1.7: accelerated non-directional dual-FOK execution frontier.
     dual_fok_enabled: bool = field(default_factory=lambda: _bool("DUAL_FOK_ENABLED", True))
-    dual_fok_base_latency_ms: int = field(default_factory=lambda: _int("DUAL_FOK_BASE_LATENCY_MS", 25))
-    dual_fok_recovery_latency_ms: int = field(default_factory=lambda: _int("DUAL_FOK_RECOVERY_LATENCY_MS", 50))
-    dual_fok_cooldown_ms: int = field(default_factory=lambda: _int("DUAL_FOK_COOLDOWN_MS", 1000))
-    dual_fok_max_book_age_ms: int = field(default_factory=lambda: _int("DUAL_FOK_MAX_BOOK_AGE_MS", 250))
+    dual_fok_base_latency_ms: int = field(default_factory=lambda: _int("DUAL_FOK_BASE_LATENCY_MS", 2))
+    dual_fok_recovery_latency_ms: int = field(default_factory=lambda: _int("DUAL_FOK_RECOVERY_LATENCY_MS", 10))
+    dual_fok_cooldown_ms: int = field(default_factory=lambda: _int("DUAL_FOK_COOLDOWN_MS", 100))
+    dual_fok_max_book_age_ms: int = field(default_factory=lambda: _int("DUAL_FOK_MAX_BOOK_AGE_MS", 100))
     dual_fok_use_surge_gate: bool = field(default_factory=lambda: _bool("DUAL_FOK_USE_SURGE_GATE", True))
     dual_fok_leg_order: str = field(default_factory=lambda: _env("DUAL_FOK_LEG_ORDER", "fragile_first"))
 
-    dual_fok_primary_size: Decimal = field(default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_SIZE", "5"))
+    dual_fok_primary_size: Decimal = field(default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_SIZE", "1"))
     dual_fok_primary_edge_target: Decimal = field(
-        default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_EDGE_TARGET", "0.005")
+        default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_EDGE_TARGET", "0.001")
     )
-    dual_fok_primary_skew_ms: int = field(default_factory=lambda: _int("DUAL_FOK_PRIMARY_SKEW_MS", 25))
+    dual_fok_primary_skew_ms: int = field(default_factory=lambda: _int("DUAL_FOK_PRIMARY_SKEW_MS", 2))
     dual_fok_primary_coverage_multiple: Decimal = field(
         default_factory=lambda: _decimal("DUAL_FOK_PRIMARY_COVERAGE_MULTIPLE", "2")
     )
-    dual_fok_primary_stability_ms: int = field(default_factory=lambda: _int("DUAL_FOK_PRIMARY_STABILITY_MS", 50))
+    dual_fok_primary_stability_ms: int = field(default_factory=lambda: _int("DUAL_FOK_PRIMARY_STABILITY_MS", 0))
 
     dual_fok_skews_ms: tuple[int, ...] = field(
-        default_factory=lambda: _int_tuple("DUAL_FOK_SKEWS_MS", "0,10,25,50,100,200")
+        default_factory=lambda: _int_tuple("DUAL_FOK_SKEWS_MS", "0,1,2,5,10,25")
     )
     dual_fok_size_candidates: tuple[Decimal, ...] = field(
-        default_factory=lambda: _decimal_tuple("DUAL_FOK_SIZE_CANDIDATES", "1,5,10,20")
+        default_factory=lambda: _decimal_tuple("DUAL_FOK_SIZE_CANDIDATES", "1,2,5,10")
     )
     dual_fok_edge_targets: tuple[Decimal, ...] = field(
-        default_factory=lambda: _decimal_tuple("DUAL_FOK_EDGE_TARGETS", "0.005,0.010,0.015,0.020,0.030")
+        default_factory=lambda: _decimal_tuple("DUAL_FOK_EDGE_TARGETS", "0.001,0.002,0.003,0.005,0.010")
     )
     dual_fok_coverage_multiples: tuple[Decimal, ...] = field(
         default_factory=lambda: _decimal_tuple("DUAL_FOK_COVERAGE_MULTIPLES", "1,2,5")
     )
     dual_fok_stability_periods_ms: tuple[int, ...] = field(
-        default_factory=lambda: _int_tuple("DUAL_FOK_STABILITY_PERIODS_MS", "0,25,50,100,250")
+        default_factory=lambda: _int_tuple("DUAL_FOK_STABILITY_PERIODS_MS", "0,2,5,10,25,50")
     )
 
-    # Reverse complete-set research assumes the UP+DOWN inventory already exists
-    # before the opportunity, avoiding any hidden on-chain split latency.
     reverse_dual_fok_enabled: bool = field(default_factory=lambda: _bool("REVERSE_DUAL_FOK_ENABLED", True))
     reverse_dual_fok_skews_ms: tuple[int, ...] = field(
-        default_factory=lambda: _int_tuple("REVERSE_DUAL_FOK_SKEWS_MS", "0,25,50")
+        default_factory=lambda: _int_tuple("REVERSE_DUAL_FOK_SKEWS_MS", "0,1,2,5,10,25")
     )
+
+    # Ideal instantaneous benchmark. It includes protocol taker fees but assumes
+    # zero inter-leg latency / no leg risk. It never contributes to shadow equity.
+    atomic_benchmark_enabled: bool = field(default_factory=lambda: _bool("ATOMIC_BENCHMARK_ENABLED", True))
+    atomic_reverse_enabled: bool = field(default_factory=lambda: _bool("ATOMIC_REVERSE_ENABLED", True))
+    atomic_sizes: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("ATOMIC_SIZES", "1,5,10,20")
+    )
+    atomic_min_net_edge_per_share: Decimal = field(
+        default_factory=lambda: _decimal("ATOMIC_MIN_NET_EDGE_PER_SHARE", "0.0001")
+    )
+    atomic_edge_bands: tuple[Decimal, ...] = field(
+        default_factory=lambda: _decimal_tuple("ATOMIC_EDGE_BANDS", "0.001,0.002,0.003,0.005,0.010")
+    )
+    atomic_max_book_age_ms: int = field(default_factory=lambda: _int("ATOMIC_MAX_BOOK_AGE_MS", 100))
+
+    # Phase 1.7 live retro terminal dashboard.
+    dashboard_enabled: bool = field(default_factory=lambda: _bool("DASHBOARD_ENABLED", True))
+    dashboard_host: str = field(default_factory=lambda: _env("DASHBOARD_HOST", "0.0.0.0"))
+    dashboard_port: int = field(default_factory=lambda: _int("DASHBOARD_PORT", 8765))
+    dashboard_refresh_ms: int = field(default_factory=lambda: _int("DASHBOARD_REFRESH_MS", 500))
+    dashboard_state_path: str = field(default_factory=lambda: _env("DASHBOARD_STATE_PATH", "data/dashboard_state.json"))
+    dashboard_event_limit: int = field(default_factory=lambda: _int("DASHBOARD_EVENT_LIMIT", 80))
+    dashboard_major_loss_usdc: Decimal = field(default_factory=lambda: _decimal("DASHBOARD_MAJOR_LOSS_USDC", "0.25"))
+    dashboard_major_win_usdc: Decimal = field(default_factory=lambda: _decimal("DASHBOARD_MAJOR_WIN_USDC", "0.10"))
 
     empirical_risk_min_samples: int = field(default_factory=lambda: _int("EMPIRICAL_RISK_MIN_SAMPLES", 20))
     use_empirical_risk_reserve: bool = field(default_factory=lambda: _bool("USE_EMPIRICAL_RISK_RESERVE", False))
