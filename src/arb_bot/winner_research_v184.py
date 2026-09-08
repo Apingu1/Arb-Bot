@@ -4,6 +4,7 @@ import time
 from decimal import Decimal
 
 from .maker_research import ZERO, _utc_now, target_bids
+from .research_context_v183 import PHASE183_RUN_ID
 from .research_context_v184 import PHASE184_RUN_ID
 from .selective_research_v184 import (
     SelectiveHybridVariantV184,
@@ -56,12 +57,8 @@ class FastEntryAndTimerGuardMixinV184:
                 bid_a, bid_b = self._v184_candidate_maker_prices(
                     book_a.best_bid(), book_b.best_bid()
                 )
-                a_first = self._maker_plus_taker_edge(
-                    bid_a, book_b, self.shares
-                )
-                b_first = self._maker_plus_taker_edge(
-                    bid_b, book_a, self.shares
-                )
+                a_first = self._maker_plus_taker_edge(bid_a, book_b, self.shares)
+                b_first = self._maker_plus_taker_edge(bid_b, book_a, self.shares)
                 raw_a = a_first.get("edge_per_share")
                 raw_b = b_first.get("edge_per_share")
                 edge_a = Decimal(str(raw_a)) if raw_a is not None else None
@@ -87,6 +84,7 @@ class FastEntryAndTimerGuardMixinV184:
                     self.recorder.write(
                         "maker_variant_placement_reject_v184",
                         {
+                            "phase183_run_id": PHASE183_RUN_ID,
                             "phase184_run_id": PHASE184_RUN_ID,
                             "strategy": self.strategy_name,
                             "market_id": pair.market_id,
