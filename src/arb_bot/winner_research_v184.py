@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from decimal import Decimal
 
-from .maker_research import ZERO
+from .maker_research import ZERO, _utc_now, target_bids
 from .selective_research_v184 import (
     SelectiveHybridVariantV184,
     SelectiveMakerVariantV184,
@@ -12,14 +12,105 @@ from .selective_research_v184 import (
 from .winner_research_v183 import WinnerResearchSuiteV183
 
 
-class TimerAgeGuardMixinV184:
-    """Evaluate stale/hard quote-age guards even when the books are unchanged.
+class FastEntryAndTimerGuardMixinV184:
+    """Fast safe-entry and deterministic quote-age protection.
 
-    The normal Phase 1.8.4 edge sampler deliberately caches identical book
-    states to keep the hot path cheap. Quote age, however, advances with wall
-    time. This timer-only guard makes the 500 ms stale rule and 1,000 ms hard
-    quote cap deterministic even during a short market-data lull.
+    The placement gate avoids sending a selective shadow maker quote when its
+    maker-first/taker-second economics are already at or beyond the toxic
+    cancellation boundary. The timer guard then enforces stale/hard quote age
+    even if the books do not update for a short period.
     """
+
+    def _v184_candidate_maker_prices(self, best_a: Decimal, best_b: Decimal):
+        # SelectivePairedMaker joins the current best bids directly. SHYB/SMAKER
+        # use the target-pair transformation inherited from the maker engine.
+        if hasattr(self, "max_pair"):
+            return best_a, best_b
+        return target_bids(
+            best_a,
+            best_b,
+            self.target_pair,
+            self.settings.maker_tick_size,
+        )
+
+    def _maybe_place(self, engine, pair, surge) -> None:
+        if self.settings.v184_placement_edge_gate_enabled:
+            book_a = engine.books.get(pair.token_a)
+            book_b = engine.books.get(pair.token_b)
+            if (
+                book_a is not None
+                and book_b is not None
+                and book_a.ready
+                and book_b.ready
+                and book_a.best_bid() is not None
+                and book_b.best_bid() is not None
+            ):
+                now = time.monotonic()
+                age_a = Decimal(
+                    str(max(0.0, (now - book_a.updated_monotonic) * 1000))
+                )
+                age_b = Decimal(
+                    str(max(0.0, (now - book_b.updated_monotonic) * 1000))
+                )
+                bid_a, bid_b = self._v184_candidate_maker_prices(
+                    book_a.best_bid(), book_b.best_bid()
+                )
+                a_first = self._maker_plus_taker_edge(
+                    bid_a, book_b, self.shares
+                )
+                b_first = self._maker_plus_taker_edge(
+                    bid_b, book_a, self.shares
+                )
+                raw_a = a_first.get("edge_per_share")
+                raw_b = b_first.get("edge_per_share")
+                edge_a = Decimal(str(raw_a)) if raw_a is not None else None
+                edge_b = Decimal(str(raw_b)) if raw_b is not None else None
+
+                reject_reason = None
+                worst_edge = None
+                if edge_a is None or edge_b is None:
+                    reject_reason = "NO_FULL_SIZE_HEDGE_QUOTE"
+                else:
+                    worst_edge = min(edge_a, edge_b)
+                    if worst_edge <= self.settings.v184_placement_min_edge_per_share:
+                        reject_reason = "TOXIC_EDGE_AT_PLACEMENT"
+                    elif max(age_a, age_b) >= Decimal(
+                        self.settings.v184_max_opposite_book_age_ms
+                    ):
+                        reject_reason = "STALE_BOOK_AT_PLACEMENT"
+
+                if reject_reason is not None:
+                    self.v184_placement_edge_skips = (
+                        getattr(self, "v184_placement_edge_skips", 0) + 1
+                    )
+                    self.recorder.write(
+                        "maker_variant_placement_reject_v184",
+                        {
+                            "phase184_run_id": getattr(
+                                __import__(
+                                    "arb_bot.research_context_v184",
+                                    fromlist=["PHASE184_RUN_ID"],
+                                ),
+                                "PHASE184_RUN_ID",
+                            ),
+                            "strategy": self.strategy_name,
+                            "market_id": pair.market_id,
+                            "slug": pair.slug,
+                            "rejected_at": _utc_now(),
+                            "reason": reject_reason,
+                            "candidate_maker_bid_a": bid_a,
+                            "candidate_maker_bid_b": bid_b,
+                            "if_a_first_edge_per_share": edge_a,
+                            "if_b_first_edge_per_share": edge_b,
+                            "worst_edge_per_share": worst_edge,
+                            "minimum_placement_edge_per_share": self.settings.v184_placement_min_edge_per_share,
+                            "book_age_a_ms": age_a,
+                            "book_age_b_ms": age_b,
+                        },
+                    )
+                    return
+
+        super()._maybe_place(engine, pair, surge)
 
     def _v184_latest_prefill_edges(self, market_id: str):
         history = self._v184_prefill_history.get(market_id, {})
@@ -91,21 +182,28 @@ class TimerAgeGuardMixinV184:
 
         super().process_due(engine)
 
+    def diagnostic_row(self):
+        row = super().diagnostic_row()
+        row["v184_placement_edge_skips"] = getattr(
+            self, "v184_placement_edge_skips", 0
+        )
+        return row
+
 
 class GuardedSelectiveHybridVariantV184(
-    TimerAgeGuardMixinV184, SelectiveHybridVariantV184
+    FastEntryAndTimerGuardMixinV184, SelectiveHybridVariantV184
 ):
     pass
 
 
 class GuardedSelectivePairedMakerVariantV184(
-    TimerAgeGuardMixinV184, SelectivePairedMakerVariantV184
+    FastEntryAndTimerGuardMixinV184, SelectivePairedMakerVariantV184
 ):
     pass
 
 
 class GuardedSelectiveMakerVariantV184(
-    TimerAgeGuardMixinV184, SelectiveMakerVariantV184
+    FastEntryAndTimerGuardMixinV184, SelectiveMakerVariantV184
 ):
     pass
 
