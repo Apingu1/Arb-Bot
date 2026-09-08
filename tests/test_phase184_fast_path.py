@@ -47,6 +47,41 @@ def _events(path):
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
+def test_v184_rejects_toxic_candidate_before_placement(tmp_path, monkeypatch):
+    monkeypatch.setattr(maker_base, "market_phase", lambda pair: maker_base.MarketPhase.LIVE)
+    settings = SettingsV184(
+        maker_min_seconds_to_expiry=0,
+        maker_use_empirical_risk_gate=False,
+        v184_placement_edge_gate_enabled=True,
+        v184_placement_min_edge_per_share=Decimal("-0.005"),
+    )
+    path = tmp_path / "placement.jsonl"
+    variant = GuardedSelectivePairedMakerVariantV184(
+        settings,
+        JsonlRecorder(str(path)),
+        MarketRegimeTracker(settings),
+        max_pair=Decimal("0.97"),
+        max_queue=Decimal("10"),
+    )
+    engine = _engine(settings)
+    # If A fills first, completing B as taker at 0.63 is already toxic.
+    engine.books["B"].apply_snapshot(
+        [{"price": "0.57", "size": "6"}],
+        [{"price": "0.63", "size": "20"}],
+    )
+
+    variant.on_market_update(engine, "m-live", SurgeSnapshot(False, ()))
+    assert "m-live" not in variant.campaigns
+    rows = _events(path)
+    reject = next(
+        row["payload"]
+        for row in rows
+        if row["event_type"] == "maker_variant_placement_reject_v184"
+    )
+    assert reject["reason"] == "TOXIC_EDGE_AT_PLACEMENT"
+    assert Decimal(reject["worst_edge_per_share"]) <= Decimal("-0.005")
+
+
 def test_v184_zero_latency_cancel_beats_future_fill(tmp_path, monkeypatch):
     monkeypatch.setattr(maker_base, "market_phase", lambda pair: maker_base.MarketPhase.LIVE)
     settings = SettingsV184(
