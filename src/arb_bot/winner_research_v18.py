@@ -5,22 +5,19 @@ from decimal import Decimal
 from .discovery import asset_from_slug
 from .maker_research import MarketRegimeTracker, ZERO
 from .maker_research_v17 import MultiAssetQueueAwareVariantEngine, PairedMakerVariantEngine
+from .runtime_controls_v18 import runtime_controls
 from .storage import JsonlRecorder
 from .strategy import ArbitrageEngine
 
 
 class WinnerResearchSuiteV18:
-    """Evidence-gated Phase 1.8 maker research.
+    """Phase 1.8 runtime-controlled maker-family research suite.
 
-    Active executable-shadow models by default:
-      - HYBRID-99
-      - HYBRID-98
-      - PMAKER-Q100
-      - PMAKER-Q250
-
-    Only configured ``winner_assets`` are allowed to start new campaigns.
-    Historical models remain in the codebase and can be re-enabled via settings,
-    but are not instantiated here as active Phase 1.8 experiments.
+    All historical MAKER/HYBRID/PMAKER variants are instantiated so they can be
+    switched on/off from ARB//TERM without restarting the bot. A model only
+    receives a market update when that exact model×asset combination is enabled.
+    Existing open campaigns continue through ``process_due`` so disabling a
+    model never strands simulated inventory.
     """
 
     def __init__(self, settings, recorder: JsonlRecorder) -> None:
@@ -28,37 +25,23 @@ class WinnerResearchSuiteV18:
         self.recorder = recorder
         self.regime = MarketRegimeTracker(settings)
 
-        self.makers: list[MultiAssetQueueAwareVariantEngine] = []
-        self.hybrids = (
-            [
-                MultiAssetQueueAwareVariantEngine(
-                    settings,
-                    recorder,
-                    self.regime,
-                    mode="HYBRID",
-                    target_pair=target,
-                )
-                for target in settings.maker_variant_targets
-                if target in {Decimal("0.99"), Decimal("0.98")}
-            ]
-            if settings.hybrid_enabled
-            else []
-        )
-        self.paired_makers = (
-            [
-                PairedMakerVariantEngine(
-                    settings,
-                    recorder,
-                    self.regime,
-                    max_queue=max_queue,
-                )
-                for max_queue in settings.paired_maker_max_queues
-                if max_queue in {Decimal("100"), Decimal("250")}
-            ]
-            if settings.paired_maker_enabled
-            else []
-        )
-        self.variants = [*self.hybrids, *self.paired_makers]
+        targets = (Decimal("0.99"), Decimal("0.98"), Decimal("0.97"), Decimal("0.96"))
+        queues = (Decimal("25"), Decimal("50"), Decimal("100"), Decimal("250"))
+
+        self.makers = [
+            MultiAssetQueueAwareVariantEngine(settings, recorder, self.regime, mode="MAKER", target_pair=target)
+            for target in targets
+        ]
+        self.hybrids = [
+            MultiAssetQueueAwareVariantEngine(settings, recorder, self.regime, mode="HYBRID", target_pair=target)
+            for target in targets
+        ]
+        self.paired_makers = [
+            PairedMakerVariantEngine(settings, recorder, self.regime, max_queue=max_queue)
+            for max_queue in queues
+        ]
+        self.variants = [*self.makers, *self.hybrids, *self.paired_makers]
+        runtime_controls.configure((variant.strategy_name for variant in self.variants), settings.market_assets)
         self.asset_skips = 0
 
     def on_market_update(self, engine: ArbitrageEngine, market_id: str) -> None:
@@ -66,28 +49,36 @@ class WinnerResearchSuiteV18:
         if pair is None:
             return
         asset = asset_from_slug(pair.slug)
-        if asset not in self.settings.winner_assets:
-            self.asset_skips += 1
+        if not asset:
             return
 
         surge = self.regime.observe(engine, market_id)
+        active = False
         for variant in self.variants:
-            variant.on_market_update(engine, market_id, surge)
+            if runtime_controls.enabled_for(variant.strategy_name, asset):
+                active = True
+                variant.on_market_update(engine, market_id, surge)
+        if not active:
+            self.asset_skips += 1
 
     def process_due(self, engine: ArbitrageEngine) -> None:
+        # Always service existing campaigns even after a UI toggle is switched
+        # off so simulated inventory is safely completed/cancelled/unwound.
         for variant in self.variants:
             variant.process_due(engine)
 
     def diagnostic_rows(self) -> list[dict]:
         rows = [variant.diagnostic_row() for variant in self.variants]
+        control = {row["model"]: row for row in runtime_controls.snapshot()["models"]}
         for row in rows:
-            row["winner_profile"] = True
-            row["winner_assets"] = self.settings.winner_assets
+            info = control.get(row["strategy"], {})
+            row["runtime_enabled"] = bool(info.get("enabled"))
+            row["enabled_assets"] = info.get("enabled_assets", [])
         return rows
 
     @property
     def maker_total_pnl(self) -> Decimal:
-        return ZERO
+        return sum((variant.total_pnl for variant in self.makers), ZERO)
 
     @property
     def hybrid_total_pnl(self) -> Decimal:
