@@ -4,6 +4,7 @@ import time
 from decimal import Decimal
 
 from .maker_research import ZERO, _utc_now, target_bids
+from .research_context_v184 import PHASE184_RUN_ID
 from .selective_research_v184 import (
     SelectiveHybridVariantV184,
     SelectiveMakerVariantV184,
@@ -86,13 +87,7 @@ class FastEntryAndTimerGuardMixinV184:
                     self.recorder.write(
                         "maker_variant_placement_reject_v184",
                         {
-                            "phase184_run_id": getattr(
-                                __import__(
-                                    "arb_bot.research_context_v184",
-                                    fromlist=["PHASE184_RUN_ID"],
-                                ),
-                                "PHASE184_RUN_ID",
-                            ),
+                            "phase184_run_id": PHASE184_RUN_ID,
                             "strategy": self.strategy_name,
                             "market_id": pair.market_id,
                             "slug": pair.slug,
