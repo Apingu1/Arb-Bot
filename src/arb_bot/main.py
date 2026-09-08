@@ -83,13 +83,20 @@ async def run() -> None:
         log.info("RFOK assumption | complete-set inventory is pre-positioned before detection; no hidden split latency is credited")
     await check_geoblock(settings)
 
-    recorder = JsonlRecorder(settings.output_path)
+    # Bind ARB//TERM before replaying the potentially very large historical JSONL.
+    # This makes the Codespaces port available immediately instead of making the
+    # browser wait for every Phase 1.x event to be parsed first.
     dashboard_state = DashboardState(settings)
-    dashboard_state.bootstrap(settings.output_path)
-    recorder.subscribe(dashboard_state.on_event)
     dashboard_server = DashboardServer(settings, dashboard_state.snapshot) if settings.dashboard_enabled else None
     if dashboard_server is not None:
         dashboard_server.start()
+
+    recorder = JsonlRecorder(settings.output_path)
+    if settings.dashboard_enabled:
+        log.info("ARB//TERM loading historical shadow P&L in a worker thread from %s", settings.output_path)
+        await asyncio.to_thread(dashboard_state.bootstrap, settings.output_path)
+        log.info("ARB//TERM historical shadow P&L loaded; switching to live event updates")
+        recorder.subscribe(dashboard_state.on_event)
 
     discovery = MarketDiscovery(
         settings.gamma_url,
@@ -160,7 +167,6 @@ async def run() -> None:
         if split_sell is not None:
             split_sell.on_market_update(engine, market_id, surge)
 
-        # Original pure taker benchmark remains as a historical control.
         if phase != MarketPhase.LIVE or not taker.can_submit(market_id):
             return
         opportunity = engine.evaluate(market_id)
@@ -256,7 +262,8 @@ async def run() -> None:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         publish_dashboard()
-        recorder.unsubscribe(dashboard_state.on_event)
+        if settings.dashboard_enabled:
+            recorder.unsubscribe(dashboard_state.on_event)
         if dashboard_server is not None:
             dashboard_server.stop()
 
