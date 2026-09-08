@@ -8,17 +8,19 @@ from datetime import datetime, timezone
 import httpx
 from dotenv import load_dotenv
 
+from .atomic_benchmark import IdealAtomicBenchmarkSuite, log_atomic_diagnostics
 from .config import Settings
-from .dashboard import DashboardServer, DashboardState
+from .dashboard_v17 import DashboardServerV17 as DashboardServer
+from .dashboard_v17 import DashboardStateV17 as DashboardState
 from .diagnostics import LiveDiagnostics
 from .diagnostics_v16 import log_dual_fok_diagnostics
 from .discovery import MarketPhase, MarketDiscovery, asset_from_slug, market_phase, select_live_and_next_pairs
-from .dual_fok_research import DualFOKResearchSuite
+from .dual_fok_v17 import DualFOKResearchSuiteV17 as DualFOKResearchSuite
 from .edge_tracker import EdgeTracker
 from .ev_frontier import SplitSellResearchSuite
 from .ev_frontier_v151 import CorrectedEVFrontierSuite
 from .hedgeable_research import HedgeableResearchSuite
-from .maker_research import MakerResearchSuite
+from .maker_research_v17 import MakerResearchSuiteV17 as MakerResearchSuite
 from .polymarket_ws import PolymarketMarketStream
 from .simulator import ShadowExecutor
 from .storage import JsonlRecorder
@@ -52,14 +54,15 @@ async def run() -> None:
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
     log.warning(
-        "PHASE 1.7 MULTI-ASSET TERMINAL SHADOW MODE: all TAKER/MAKER/HEDGE/EV/DFOK/RFOK strategies are simulation-only; live order placement is not implemented."
+        "PHASE 1.7 MULTI-ASSET TERMINAL SHADOW MODE: TAKER/MAKER/PMAKER/HEDGE/EV/DFOK/RFOK are simulation-only; ATOMIC is an ideal non-executable benchmark; live order placement is not implemented."
     )
     log.info(
-        "Market universe | assets=%s lookahead=%d intervals | dashboard=%s port=%d",
+        "Market universe | assets=%s lookahead=%d intervals | dashboard=%s port=%d | strategy_timer=%dms",
         settings.market_assets,
         settings.market_lookahead_intervals,
         settings.dashboard_enabled,
         settings.dashboard_port,
+        settings.strategy_timer_interval_ms,
     )
     log.info(
         "Dual-FOK research | base_latency=%dms skews=%s sizes=%s edges=%s coverage=%s stability=%s surge_gate=%s leg_order=%s",
@@ -73,6 +76,22 @@ async def run() -> None:
         settings.dual_fok_leg_order,
     )
     log.info(
+        "Ideal atomic benchmark | enabled=%s reverse=%s sizes=%s min_edge=%s bands=%s (excluded from shadow equity)",
+        settings.atomic_benchmark_enabled,
+        settings.atomic_reverse_enabled,
+        settings.atomic_sizes,
+        settings.atomic_min_net_edge_per_share,
+        settings.atomic_edge_bands,
+    )
+    log.info(
+        "Paired maker | enabled=%s shares=%s target_pair=%s max_queues=%s max_imbalance=%sx",
+        settings.paired_maker_enabled,
+        settings.paired_maker_trade_shares,
+        settings.paired_maker_target_pair,
+        settings.paired_maker_max_queues,
+        settings.paired_maker_max_queue_imbalance,
+    )
+    log.info(
         "EV historical control | EV_MIN_EXPECTED_PROFIT_USDC=%s independently of HEDGE_MIN_EXPECTED_PROFIT_USDC=%s",
         settings.ev_min_expected_profit_usdc,
         settings.hedge_min_expected_profit_usdc,
@@ -84,8 +103,6 @@ async def run() -> None:
     await check_geoblock(settings)
 
     # Bind ARB//TERM before replaying the potentially very large historical JSONL.
-    # This makes the Codespaces port available immediately instead of making the
-    # browser wait for every Phase 1.x event to be parsed first.
     dashboard_state = DashboardState(settings)
     dashboard_server = DashboardServer(settings, dashboard_state.snapshot) if settings.dashboard_enabled else None
     if dashboard_server is not None:
@@ -95,7 +112,7 @@ async def run() -> None:
     if settings.dashboard_enabled:
         log.info("ARB//TERM loading historical shadow P&L in a worker thread from %s", settings.output_path)
         await asyncio.to_thread(dashboard_state.bootstrap, settings.output_path)
-        log.info("ARB//TERM historical shadow P&L loaded; switching to live event updates")
+        log.info("ARB//TERM historical shadow P&L loaded; session P&L reset to zero for this process")
         recorder.subscribe(dashboard_state.on_event)
 
     discovery = MarketDiscovery(
@@ -111,6 +128,7 @@ async def run() -> None:
     frontier = CorrectedEVFrontierSuite(settings, recorder, research.regime)
     split_sell = SplitSellResearchSuite(settings, recorder, research.regime) if settings.split_sell_enabled else None
     dual_fok = DualFOKResearchSuite(settings, recorder)
+    atomic = IdealAtomicBenchmarkSuite(settings, recorder)
     edge_tracker = EdgeTracker(recorder, settings.edge_record_min_interval_ms)
     diagnostics = LiveDiagnostics(settings.diagnostic_interval_seconds)
     stream = PolymarketMarketStream(settings.websocket_url)
@@ -122,6 +140,7 @@ async def run() -> None:
         hedge.process_due(engine)
         frontier.process_due(engine)
         dual_fok.process_due(engine)
+        atomic.process_due(engine)
         if split_sell is not None:
             split_sell.process_due(engine)
 
@@ -137,6 +156,7 @@ async def run() -> None:
             hedge=hedge,
             frontier=frontier,
             dual_fok=dual_fok,
+            atomic=atomic,
             split_sell=split_sell,
         )
 
@@ -164,9 +184,11 @@ async def run() -> None:
         hedge.on_market_update(engine, market_id, surge)
         frontier.on_market_update(engine, market_id, surge)
         dual_fok.on_market_update(engine, market_id, surge)
+        atomic.on_market_update(engine, market_id)
         if split_sell is not None:
             split_sell.on_market_update(engine, market_id, surge)
 
+        # Fast legacy taker remains an independent control.
         if phase != MarketPhase.LIVE or not taker.can_submit(market_id):
             return
         opportunity = engine.evaluate(market_id)
@@ -174,8 +196,9 @@ async def run() -> None:
             taker.submit(opportunity)
 
     async def timer_loop() -> None:
+        interval = max(0.0005, settings.strategy_timer_interval_ms / 1000)
         while True:
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(interval)
             process_strategy_timers()
 
     async def diagnostic_loop() -> None:
@@ -192,6 +215,7 @@ async def run() -> None:
                 split_sell=split_sell,
             )
             log_dual_fok_diagnostics(dual_fok)
+            log_atomic_diagnostics(atomic)
 
     async def dashboard_loop() -> None:
         while True:
@@ -243,6 +267,7 @@ async def run() -> None:
 
             process_strategy_timers()
             engine.set_markets(stream_pairs)
+            process_strategy_timers()
             publish_dashboard()
             token_ids = [token for pair in stream_pairs for token in (pair.token_a, pair.token_b)]
             refresh = settings.market_refresh_seconds
@@ -278,6 +303,7 @@ async def run() -> None:
         split_sell=split_sell,
     )
     log_dual_fok_diagnostics(dual_fok)
+    log_atomic_diagnostics(atomic)
     log.info("Finished Phase 1.7 shadow run | legacy TAKER=%+.4f pUSD", float(taker.total_pnl))
     for row in dual_fok.ranked_rows():
         log.info(
