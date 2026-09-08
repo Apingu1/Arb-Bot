@@ -10,6 +10,72 @@ from .report_v183 import _filter_event, _iter_rows, _latest_run_id
 from .report_v183_cli import cli as cli_v183
 
 
+def _placement_reject_table(
+    path: Path,
+    *,
+    run_id: str | None,
+    strategy_filter: str | None,
+    asset_filter: str | None,
+) -> str:
+    grouped = defaultdict(
+        lambda: {
+            "n": 0,
+            "edges": [],
+            "book_ages": [],
+            "reasons": defaultdict(int),
+        }
+    )
+    for row in _iter_rows(path) or ():
+        if row.get("event_type") != "maker_variant_placement_reject_v184":
+            continue
+        payload = row["payload"]
+        if not _filter_event(
+            payload,
+            run_id=run_id,
+            strategy=strategy_filter,
+            asset=asset_filter,
+        ):
+            continue
+        name = str(payload.get("strategy") or "UNKNOWN")
+        item = grouped[name]
+        item["n"] += 1
+        item["reasons"][str(payload.get("reason") or "UNKNOWN")] += 1
+        if payload.get("worst_edge_per_share") is not None:
+            item["edges"].append(_d(payload.get("worst_edge_per_share")))
+        ages = [
+            _d(payload.get("book_age_a_ms"))
+            if payload.get("book_age_a_ms") is not None
+            else None,
+            _d(payload.get("book_age_b_ms"))
+            if payload.get("book_age_b_ms") is not None
+            else None,
+        ]
+        valid_ages = [value for value in ages if value is not None]
+        if valid_ages:
+            item["book_ages"].append(max(valid_ages))
+
+    lines = [
+        "PHASE 1.8.4 SAFE-ENTRY GATE",
+        "Candidates below are rejected before a maker campaign is placed; they are not zero-P&L trades and must not be counted as wins.",
+    ]
+    if not grouped:
+        lines.append("no Phase 1.8.4 placement-gate rejects yet")
+        return "\n".join(lines)
+    lines.extend(
+        [
+            f"{'STRATEGY':24s} {'REJECTS':>7s} {'P50 WORST EDGE':>15s} {'P50 BOOK AGE':>13s} {'TOP REASON':>26s}",
+            "-" * 92,
+        ]
+    )
+    for name, item in sorted(grouped.items()):
+        top_reason = max(item["reasons"], key=item["reasons"].get) if item["reasons"] else "-"
+        lines.append(
+            f"{name:24s} {item['n']:7d} {float(_med(item['edges']) or 0):+15.5f} "
+            f"{float(_med(item['book_ages']) or 0):11.1f}ms {top_reason:>26s}"
+        )
+    return "\n".join(lines)
+
+
 def _fast_cancel_table(
     path: Path,
     *,
@@ -158,7 +224,13 @@ def _atomic_execution_table(
     asset_filter: str | None,
 ) -> str:
     grouped = defaultdict(
-        lambda: {"n": 0, "fills": 0, "pnl": Decimal("0"), "edges": [], "outcomes": defaultdict(int)}
+        lambda: {
+            "n": 0,
+            "fills": 0,
+            "pnl": Decimal("0"),
+            "edges": [],
+            "outcomes": defaultdict(int),
+        }
     )
     for row in _iter_rows(path) or ():
         if row.get("event_type") != "atomic_execution_proxy_v184":
@@ -170,7 +242,10 @@ def _atomic_execution_table(
             continue
         if asset_filter and _asset(payload) != asset_filter:
             continue
-        key = (str(payload.get("strategy") or "UNKNOWN"), int(payload.get("target_latency_ms") or 0))
+        key = (
+            str(payload.get("strategy") or "UNKNOWN"),
+            int(payload.get("target_latency_ms") or 0),
+        )
         item = grouped[key]
         item["n"] += 1
         outcome = str(payload.get("outcome") or "UNKNOWN")
@@ -221,6 +296,15 @@ def cli() -> None:
     strategy_filter = args.strategy.upper() if args.strategy else None
     asset_filter = args.asset.upper() if args.asset else None
 
+    print()
+    print(
+        _placement_reject_table(
+            path,
+            run_id=run_id,
+            strategy_filter=strategy_filter,
+            asset_filter=asset_filter,
+        )
+    )
     print()
     print(
         _fast_cancel_table(
