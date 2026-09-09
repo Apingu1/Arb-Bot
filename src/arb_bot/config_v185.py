@@ -11,24 +11,15 @@ from .config_v184 import SettingsV184
 class SettingsV185(SettingsV184):
     """Phase 1.8.5 profit-first shadow execution controls.
 
-    The objective is no longer to manufacture activity from weak maker setups.
-    A single canonical BUY complete-set strategy is allowed to submit only when
-    the local books show a robust positive edge, sufficient depth, fresh books,
-    and the opportunity survives a second pre-flight check after simulated
-    end-to-end latency. One-leg misses are still realized honestly through the
-    existing recovery logic rather than being discarded.
+    PFOK only books P&L after an executable two-leg attempt or an honest
+    one-leg recovery. Rejected opportunities remain no-trades. The defaults
+    below were widened after the initial 1.8.5 run showed that a 10 ms dual-book
+    freshness gate + 1.5 cent edge + 3x depth suppressed every candidate.
     """
 
-    # Phase 1.8.4 selective maker research generated very large reject logs and
-    # no useful fills. Keep it available by env override, but off by default in
-    # this profit-focused branch.
     v181_selective_enabled: bool = field(
         default_factory=lambda: _bool("V185_KEEP_SELECTIVE_MAKER_RESEARCH", False)
     )
-
-    # SELL_PAIR atomic rows mirror BUY_PAIR unless complete-set inventory is
-    # genuinely pre-positioned. Disable the mirrored control by default so the
-    # report represents independent opportunities cleanly.
     atomic_reverse_enabled: bool = field(
         default_factory=lambda: _bool("V185_ATOMIC_REVERSE_CONTROL", False)
     )
@@ -40,37 +31,39 @@ class SettingsV185(SettingsV184):
         default_factory=lambda: _decimal_tuple("V185_PROFIT_SIZES", "1,2,5")
     )
 
-    # Require a meaningful detection buffer. The last observed executable
-    # atomic episode carried roughly +0.026 to +0.036/share before decay, so a
-    # +0.015/share trigger deliberately ignores marginal opportunities.
+    # Detection remains positive after taker fees, but no longer requires the
+    # unusually large +1.5 cent edge that only appeared in rare atomic episodes.
     v185_detection_min_edge_per_share: Decimal = field(
-        default_factory=lambda: _decimal("V185_DETECTION_MIN_EDGE_PER_SHARE", "0.015")
+        default_factory=lambda: _decimal("V185_DETECTION_MIN_EDGE_PER_SHARE", "0.005")
     )
-    # The pair is re-quoted after end-to-end latency before any first-leg shadow
-    # fill is permitted. If less than +0.010/share survives, no trade is sent.
+    # Re-quote after simulated end-to-end latency. If +0.003/share does not
+    # survive, no first-leg shadow fill is permitted.
     v185_preflight_min_edge_per_share: Decimal = field(
-        default_factory=lambda: _decimal("V185_PREFLIGHT_MIN_EDGE_PER_SHARE", "0.010")
+        default_factory=lambda: _decimal("V185_PREFLIGHT_MIN_EDGE_PER_SHARE", "0.003")
     )
-    # Before the second FOK leg is accepted, the complete-set result must still
-    # clear this floor after both taker fees. Otherwise the strategy takes the
-    # one-leg recovery path instead of pretending the second leg filled.
+    # The complete-set result must remain positive after both taker fees.
     v185_final_min_edge_per_share: Decimal = field(
-        default_factory=lambda: _decimal("V185_FINAL_MIN_EDGE_PER_SHARE", "0.005")
+        default_factory=lambda: _decimal("V185_FINAL_MIN_EDGE_PER_SHARE", "0.001")
     )
 
-    # Robustness against disappearing top-of-book liquidity.
+    # Require real depth, but avoid the original 3x filter that eliminated all
+    # otherwise executable candidates.
     v185_detection_coverage_multiple: Decimal = field(
-        default_factory=lambda: _decimal("V185_DETECTION_COVERAGE_MULTIPLE", "3")
+        default_factory=lambda: _decimal("V185_DETECTION_COVERAGE_MULTIPLE", "1.5")
     )
     v185_preflight_coverage_multiple: Decimal = field(
-        default_factory=lambda: _decimal("V185_PREFLIGHT_COVERAGE_MULTIPLE", "1.5")
-    )
-    v185_max_book_age_ms: int = field(
-        default_factory=lambda: _int("V185_MAX_BOOK_AGE_MS", 10)
+        default_factory=lambda: _decimal("V185_PREFLIGHT_COVERAGE_MULTIPLE", "1.0")
     )
 
-    # Simulated order path. The observed scheduler may execute later than these
-    # targets; actual elapsed times are recorded in every finalized trade.
+    # Websocket updates arrive per token/book. A 10 ms requirement on both
+    # books was too strict because the opposite token may simply not have had an
+    # update in the same 10 ms window. 25 ms is still much tighter than the old
+    # 100/250 ms research gates and remains below the observed 25 ms expiry
+    # frontier for the strongest opportunities.
+    v185_max_book_age_ms: int = field(
+        default_factory=lambda: _int("V185_MAX_BOOK_AGE_MS", 25)
+    )
+
     v185_base_latency_ms: int = field(
         default_factory=lambda: _int("V185_BASE_LATENCY_MS", 2)
     )
@@ -85,4 +78,11 @@ class SettingsV185(SettingsV184):
     )
     v185_use_surge_gate: bool = field(
         default_factory=lambda: _bool("V185_USE_SURGE_GATE", True)
+    )
+
+    # Gate snapshots are sampled rather than logged on every websocket message,
+    # so we can diagnose zero-trade runs without recreating multi-million-line
+    # reject logs.
+    v185_gate_sample_interval_ms: int = field(
+        default_factory=lambda: _int("V185_GATE_SAMPLE_INTERVAL_MS", 250)
     )
