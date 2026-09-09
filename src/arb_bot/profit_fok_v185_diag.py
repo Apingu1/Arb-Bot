@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
@@ -17,7 +18,7 @@ ZERO = Decimal("0")
 
 
 class DiagnosedProfitFOKEngineV185(ProfitFOKEngineV185):
-    """PFOK with low-volume gate telemetry for zero-candidate diagnosis."""
+    """PFOK with low-volume gate telemetry for opportunity-cost diagnosis."""
 
     def __init__(self, settings, recorder: JsonlRecorder) -> None:
         super().__init__(settings, recorder)
@@ -119,26 +120,119 @@ class DiagnosedProfitFOKEngineV185(ProfitFOKEngineV185):
                 if self.settings.v185_use_surge_gate and surge is not None and surge.active:
                     payload["gate_reason"] = "SURGE_BLOCK"
                 self.recorder.write("profit_fok_gate_sample_v185", payload)
-                self._gate_sample_after[market_id] = now + self.settings.v185_gate_sample_interval_ms / 1000
+                self._gate_sample_after[market_id] = (
+                    now + self.settings.v185_gate_sample_interval_ms / 1000
+                )
 
         super().on_market_update(engine, market_id, surge)
 
 
+class NamedDiagnosedProfitFOKEngineV185(DiagnosedProfitFOKEngineV185):
+    """Identical PFOK mechanics under a distinct strategy label."""
+
+    def __init__(self, settings, recorder: JsonlRecorder, strategy: str) -> None:
+        # ProfitFOKEngineV185 reads self.strategy while constructing StrategyEquity,
+        # so set the instance label before entering the parent constructor.
+        self.strategy = strategy
+        super().__init__(settings, recorder)
+
+
 class DiagnosedProfitFOKSuiteV185:
+    """Control PFOK plus parallel out-of-sample frontier variants.
+
+    The first engine is always the original PFOK control with the exact settings
+    supplied by SettingsV185. Experimental variants use dataclass copies, so no
+    variant can mutate or weaken the control configuration.
+    """
+
     def __init__(self, settings, recorder: JsonlRecorder) -> None:
         self.settings = settings
         self.engine = DiagnosedProfitFOKEngineV185(settings, recorder)
-        self.variants = [self.engine]
+        self.variants: list[DiagnosedProfitFOKEngineV185] = [self.engine]
+
+        if settings.v185_parallel_pfok_enabled:
+            sample_ms = settings.v185_frontier_gate_sample_interval_ms
+            specs = [
+                (
+                    "PFOK-EDGE3",
+                    replace(
+                        settings,
+                        v185_detection_min_edge_per_share=Decimal("0.003"),
+                        v185_preflight_min_edge_per_share=Decimal("0.002"),
+                        v185_final_min_edge_per_share=Decimal("0.001"),
+                        v185_gate_sample_interval_ms=sample_ms,
+                    ),
+                ),
+                (
+                    "PFOK-DEPTH1",
+                    replace(
+                        settings,
+                        v185_detection_coverage_multiple=Decimal("1.0"),
+                        v185_preflight_coverage_multiple=Decimal("1.0"),
+                        v185_gate_sample_interval_ms=sample_ms,
+                    ),
+                ),
+                (
+                    "PFOK-NOSURGE",
+                    replace(
+                        settings,
+                        v185_use_surge_gate=False,
+                        v185_gate_sample_interval_ms=sample_ms,
+                    ),
+                ),
+                (
+                    "PFOK-AGGR",
+                    replace(
+                        settings,
+                        v185_detection_min_edge_per_share=Decimal("0.003"),
+                        v185_preflight_min_edge_per_share=Decimal("0.0015"),
+                        v185_final_min_edge_per_share=Decimal("0.0005"),
+                        v185_detection_coverage_multiple=Decimal("1.0"),
+                        v185_preflight_coverage_multiple=Decimal("1.0"),
+                        v185_gate_sample_interval_ms=sample_ms,
+                    ),
+                ),
+                (
+                    "PFOK-S10",
+                    replace(
+                        settings,
+                        v185_profit_sizes=(Decimal("10"),),
+                        v185_gate_sample_interval_ms=sample_ms,
+                    ),
+                ),
+                (
+                    "PFOK-S20",
+                    replace(
+                        settings,
+                        v185_profit_sizes=(Decimal("20"),),
+                        v185_gate_sample_interval_ms=sample_ms,
+                    ),
+                ),
+            ]
+            for strategy, variant_settings in specs:
+                self.variants.append(
+                    NamedDiagnosedProfitFOKEngineV185(
+                        variant_settings,
+                        recorder,
+                        strategy,
+                    )
+                )
 
     def on_market_update(self, engine, market_id: str, surge=None) -> None:
-        self.engine.on_market_update(engine, market_id, surge)
+        for variant in self.variants:
+            variant.on_market_update(engine, market_id, surge)
 
     def process_due(self, engine) -> None:
-        self.engine.process_due(engine)
+        for variant in self.variants:
+            variant.process_due(engine)
 
     def diagnostic_rows(self) -> list[dict[str, Any]]:
-        return [self.engine.diagnostic_row()]
+        return [variant.diagnostic_row() for variant in self.variants]
 
     def ranked_rows(self) -> list[dict[str, Any]]:
-        row = self.engine.diagnostic_row()
-        return [row] if row["placements"] > 0 else []
+        rows = [row for row in self.diagnostic_rows() if row["placements"] > 0]
+        return sorted(
+            rows,
+            key=lambda row: (row["ev_per_placement"], row["p_both"], -row["p_miss"]),
+            reverse=True,
+        )
