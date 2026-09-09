@@ -3,7 +3,7 @@ from __future__ import annotations
 from . import main as _base
 from .atomic_benchmark_v184 import AtomicExecutionBenchmarkSuiteV184, log_atomic_diagnostics_v184
 from .config_v186 import SettingsV186
-from .dashboard_v18 import DashboardServerV18, DashboardStateV18
+from .dashboard_v186 import DashboardServerV186, DashboardStateV186
 from .latency_runtime_v186 import LatencyFirstDualFOKSuiteV186, LatencyFirstMakerResearchSuiteV186
 from .main_v182 import InactiveTakerExecutor
 from .research_context_v186 import PHASE186_RUN_ID
@@ -25,8 +25,8 @@ def cli() -> None:
     _base.DualFOKResearchSuite = LatencyFirstDualFOKSuiteV186
     _base.IdealAtomicBenchmarkSuite = AtomicExecutionBenchmarkSuiteV184
     _base.log_atomic_diagnostics = log_atomic_diagnostics_v184
-    _base.DashboardState = DashboardStateV18
-    _base.DashboardServer = DashboardServerV18
+    _base.DashboardState = DashboardStateV186
+    _base.DashboardServer = DashboardServerV186
 
     _ = PHASE186_RUN_ID
     _base.cli()
