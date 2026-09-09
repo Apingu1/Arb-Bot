@@ -4,8 +4,8 @@ from . import main as _base
 from .atomic_benchmark_v184 import AtomicExecutionBenchmarkSuiteV184, log_atomic_diagnostics_v184
 from .config_v186 import SettingsV186
 from .dashboard_v18 import DashboardServerV18, DashboardStateV18
+from .latency_runtime_v186 import LatencyFirstDualFOKSuiteV186, LatencyFirstMakerResearchSuiteV186
 from .main_v182 import InactiveTakerExecutor
-from .profit_fok_v186 import LatencyFirstDualFOKSuiteV186, LatencyFirstMakerResearchSuiteV186
 from .research_context_v186 import PHASE186_RUN_ID
 from .storage_v186 import LowLatencyJsonlRecorderV186
 from .strategy_v186 import ArbitrageEngineV186
