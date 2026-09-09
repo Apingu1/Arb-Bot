@@ -2,59 +2,86 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from statistics import median
+from typing import Any
 
-from .report_v183 import _filter_event, _iter_rows, _latest_run_id
+from .report_v183 import _iter_rows, _latest_run_id
 from .report_v184_cli import cli as cli_v184
 from .report_v181 import _asset, _d
+
+
+PFOK_PREFIX = "PFOK"
+EPISODE_WINDOW_MS = 500
 
 
 def _med(values: list[Decimal]) -> Decimal:
     return Decimal(str(median(values))) if values else Decimal("0")
 
 
-def _profit_fok_table(
-    path: Path,
-    *,
-    run_id: str | None,
-    asset_filter: str | None,
-) -> str:
-    candidates = []
-    rejects = []
-    placements = []
-    executions = []
+def _matches(payload: dict[str, Any], *, run_id: str | None, asset_filter: str | None) -> bool:
+    if run_id and str(payload.get("phase183_run_id") or "") != run_id:
+        return False
+    if asset_filter and _asset(payload) != asset_filter:
+        return False
+    return True
 
+
+def _timestamp(value: Any) -> float | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _collect_pfok(path: Path, *, run_id: str | None, asset_filter: str | None):
+    by_strategy: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(
+        lambda: {"candidates": [], "rejects": [], "placements": [], "executions": []}
+    )
     for row in _iter_rows(path) or ():
-        event_type = str(row.get("event_type") or "")
         payload = row["payload"]
-        if str(payload.get("strategy") or "") != "PFOK":
+        strategy = str(payload.get("strategy") or "")
+        if not strategy.startswith(PFOK_PREFIX):
             continue
-        if not _filter_event(payload, run_id=run_id, strategy="PFOK", asset=asset_filter):
+        if not _matches(payload, run_id=run_id, asset_filter=asset_filter):
             continue
+        event_type = str(row.get("event_type") or "")
         if event_type == "profit_fok_candidate_v185":
-            candidates.append(payload)
+            by_strategy[strategy]["candidates"].append(payload)
         elif event_type == "profit_fok_preflight_reject_v185":
-            rejects.append(payload)
+            by_strategy[strategy]["rejects"].append(payload)
         elif event_type == "dual_fok_attempt_placed" and payload.get("mode") == "PROFIT_FOK_V185":
-            placements.append(payload)
+            by_strategy[strategy]["placements"].append(payload)
         elif event_type == "dual_fok_execution_summary" and payload.get("mode") == "PROFIT_FOK_V185":
-            executions.append(payload)
+            by_strategy[strategy]["executions"].append(payload)
+    return by_strategy
+
+
+def _profit_fok_table(path: Path, *, run_id: str | None, asset_filter: str | None) -> str:
+    grouped = _collect_pfok(path, run_id=run_id, asset_filter=asset_filter)
+    rows = grouped.get("PFOK", {"candidates": [], "rejects": [], "placements": [], "executions": []})
+    candidates = rows["candidates"]
+    rejects = rows["rejects"]
+    placements = rows["placements"]
+    executions = rows["executions"]
 
     lines = [
-        "PHASE 1.8.5 PROFIT-FIRST PFOK",
-        "Canonical BUY complete-set shadow strategy. Preflight rejects are NO-TRADE decisions and never count as wins or P&L.",
+        "PHASE 1.8.5 PROFIT-FIRST PFOK CONTROL",
+        "Original profitable PFOK is unchanged. Preflight rejects are NO-TRADE decisions and never count as wins or P&L.",
     ]
     if not candidates and not executions:
-        lines.append("no Phase 1.8.5 PFOK candidates yet")
+        lines.append("no Phase 1.8.5 PFOK control candidates yet")
         return "\n".join(lines)
 
     wins = [row for row in executions if _d(row.get("realized_pnl")) > 0]
     losses = [row for row in executions if _d(row.get("realized_pnl")) < 0]
     flats = len(executions) - len(wins) - len(losses)
     total_pnl = sum((_d(row.get("realized_pnl")) for row in executions), Decimal("0"))
-    pnls = [_d(row.get("realized_pnl")) for row in executions]
     detected_edges = [_d(row.get("detected_edge_per_share")) for row in executions]
     preflight_edges = [
         _d(row.get("preflight_edge_per_share"))
@@ -72,11 +99,10 @@ def _profit_fok_table(
         if row.get("actual_arrival_b_ms") is not None
     ]
 
-    submitted = len(placements)
     decided = len(executions)
     lines.extend(
         [
-            f"candidates={len(candidates)} preflight_rejects={len(rejects)} submitted={submitted} finalized={decided}",
+            f"candidates={len(candidates)} preflight_rejects={len(rejects)} submitted={len(placements)} finalized={decided}",
             f"wins={len(wins)} losses={len(losses)} flats={flats} win_rate={(len(wins)/decided*100 if decided else 0):.1f}% total_pnl={float(total_pnl):+.5f} pUSD avg_pnl={(float(total_pnl/Decimal(decided)) if decided else 0):+.5f}",
             f"p50_detected_edge={float(_med(detected_edges)):+.5f}/sh p50_preflight_edge={float(_med(preflight_edges)):+.5f}/sh p50_arrival_A={float(_med(a_arrivals)):.2f}ms p50_arrival_B={float(_med(b_arrivals)):.2f}ms",
         ]
@@ -122,8 +148,140 @@ def _profit_fok_table(
         reasons = defaultdict(int)
         for row in rejects:
             reasons[str(row.get("reason") or "UNKNOWN")] += 1
-        lines.append("preflight_reject_reasons=" + ", ".join(f"{k}:{v}" for k, v in sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))))
+        lines.append("preflight_reject_reasons=" + ", ".join(
+            f"{k}:{v}" for k, v in sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))
+        ))
 
+    return "\n".join(lines)
+
+
+def _frontier_table(path: Path, *, run_id: str | None, asset_filter: str | None) -> str:
+    grouped = _collect_pfok(path, run_id=run_id, asset_filter=asset_filter)
+    lines = [
+        "PHASE 1.8.5 PFOK FRONTIER COMPARISON",
+        "Parallel alternatives share market data but maintain independent shadow equity. DO NOT sum variant P&L as one deployable portfolio.",
+        f"{'STRATEGY':16s} {'CAND':>5s} {'SUB':>5s} {'DONE':>5s} {'W/L':>9s} {'WIN%':>7s} {'PNL':>11s} {'EV/TRADE':>10s} {'MISS':>5s}",
+        "-" * 87,
+    ]
+    names = ["PFOK", "PFOK-EDGE3", "PFOK-DEPTH1", "PFOK-NOSURGE", "PFOK-AGGR", "PFOK-S10", "PFOK-S20"]
+    seen = False
+    for name in names:
+        item = grouped.get(name)
+        if item is None:
+            continue
+        seen = True
+        executions = item["executions"]
+        wins = sum(1 for row in executions if _d(row.get("realized_pnl")) > 0)
+        losses = sum(1 for row in executions if _d(row.get("realized_pnl")) < 0)
+        pnl = sum((_d(row.get("realized_pnl")) for row in executions), Decimal("0"))
+        n = len(executions)
+        miss = sum(1 for row in executions if str(row.get("status") or "") == "ONE_LEG_MISS")
+        lines.append(
+            f"{name:16s} {len(item['candidates']):5d} {len(item['placements']):5d} {n:5d} "
+            f"{wins:3d}/{losses:<3d} {(wins/n*100 if n else 0):6.1f}% {float(pnl):+11.5f} "
+            f"{(float(pnl/Decimal(n)) if n else 0):+10.5f} {miss:5d}"
+        )
+    if not seen:
+        lines.append("no PFOK frontier events yet")
+    return "\n".join(lines)
+
+
+def _episode_table(path: Path, *, run_id: str | None, asset_filter: str | None) -> str:
+    grouped = _collect_pfok(path, run_id=run_id, asset_filter=asset_filter)
+    events: list[tuple[float, str, dict[str, Any]]] = []
+    for strategy, item in grouped.items():
+        for row in item["executions"]:
+            ts = _timestamp(row.get("finalized_at"))
+            if ts is not None:
+                events.append((ts, strategy, row))
+    events.sort(key=lambda item: item[0])
+
+    episodes: list[dict[str, Any]] = []
+    last_by_market: dict[str, tuple[float, int]] = {}
+    for ts, strategy, row in events:
+        market = str(row.get("market_id") or row.get("slug") or "UNKNOWN")
+        previous = last_by_market.get(market)
+        if previous is None or (ts - previous[0]) * 1000 > EPISODE_WINDOW_MS:
+            episode = {"market": market, "first_ts": ts, "last_ts": ts, "rows": [(strategy, row)]}
+            episodes.append(episode)
+            idx = len(episodes) - 1
+        else:
+            idx = previous[1]
+            episodes[idx]["last_ts"] = ts
+            episodes[idx]["rows"].append((strategy, row))
+        last_by_market[market] = (ts, idx)
+
+    lines = [
+        "PHASE 1.8.5 INDEPENDENT PFOK EPISODES",
+        f"Executions within {EPISODE_WINDOW_MS} ms on the same market are one correlated episode, regardless of how many variants fired.",
+    ]
+    if not episodes:
+        lines.append("no finalized PFOK episodes yet")
+        return "\n".join(lines)
+
+    control_episodes = 0
+    any_positive = 0
+    any_loss = 0
+    for episode in episodes:
+        rows = episode["rows"]
+        if any(strategy == "PFOK" for strategy, _ in rows):
+            control_episodes += 1
+        pnls = [_d(row.get("realized_pnl")) for _, row in rows]
+        any_positive += int(any(p > 0 for p in pnls))
+        any_loss += int(any(p < 0 for p in pnls))
+    lines.append(
+        f"independent_episodes={len(episodes)} control_participated={control_episodes} episodes_with_any_win={any_positive} episodes_with_any_loss={any_loss}"
+    )
+    return "\n".join(lines)
+
+
+def _atomic_pfok_funnel(path: Path, *, run_id: str | None, asset_filter: str | None) -> str:
+    atomic: list[tuple[str, float]] = []
+    pfok_candidates: list[tuple[str, float]] = []
+    pfok_exec: list[tuple[str, float, Decimal]] = []
+
+    for row in _iter_rows(path) or ():
+        payload = row["payload"]
+        if not _matches(payload, run_id=run_id, asset_filter=asset_filter):
+            continue
+        event_type = str(row.get("event_type") or "")
+        strategy = str(payload.get("strategy") or "")
+        market = str(payload.get("market_id") or payload.get("slug") or "")
+        if event_type == "atomic_benchmark_capture_v183" and strategy == "ATOMIC-BUY-S5":
+            ts = _timestamp(payload.get("captured_at"))
+            if ts is not None:
+                atomic.append((market, ts))
+        elif event_type == "profit_fok_candidate_v185" and strategy == "PFOK":
+            ts = _timestamp(payload.get("detected_at"))
+            if ts is not None:
+                pfok_candidates.append((market, ts))
+        elif event_type == "dual_fok_execution_summary" and strategy == "PFOK" and payload.get("mode") == "PROFIT_FOK_V185":
+            ts = _timestamp(payload.get("finalized_at"))
+            if ts is not None:
+                pfok_exec.append((market, ts, _d(payload.get("realized_pnl"))))
+
+    lines = [
+        "PHASE 1.8.5 ATOMIC -> PFOK CONTROL FUNNEL",
+        "Uses ATOMIC-BUY-S5 as the comparable ideal 5-share window. Matching is by market and nearby timestamp; atomic remains benchmark-only.",
+    ]
+    if not atomic:
+        lines.append("no comparable ATOMIC-BUY-S5 captures yet")
+        return "\n".join(lines)
+
+    match_ms = 500
+    candidate_matches = 0
+    finalized_matches = 0
+    winning_matches = 0
+    for market, ats in atomic:
+        has_candidate = any(market == m and abs(ts - ats) * 1000 <= match_ms for m, ts in pfok_candidates)
+        has_exec = [(ts, pnl) for m, ts, pnl in pfok_exec if market == m and 0 <= (ts - ats) * 1000 <= 2000]
+        candidate_matches += int(has_candidate)
+        finalized_matches += int(bool(has_exec))
+        winning_matches += int(any(pnl > 0 for _, pnl in has_exec))
+
+    lines.append(
+        f"atomic_s5_windows={len(atomic)} matched_control_candidates={candidate_matches} matched_control_finalized={finalized_matches} matched_control_wins={winning_matches} unmatched_atomic={len(atomic)-candidate_matches}"
+    )
     return "\n".join(lines)
 
 
@@ -144,6 +302,12 @@ def cli() -> None:
 
     print()
     print(_profit_fok_table(path, run_id=run_id, asset_filter=asset_filter))
+    print()
+    print(_frontier_table(path, run_id=run_id, asset_filter=asset_filter))
+    print()
+    print(_episode_table(path, run_id=run_id, asset_filter=asset_filter))
+    print()
+    print(_atomic_pfok_funnel(path, run_id=run_id, asset_filter=asset_filter))
 
 
 if __name__ == "__main__":
