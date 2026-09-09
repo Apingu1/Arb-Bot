@@ -5,7 +5,7 @@ from .atomic_benchmark_v184 import AtomicExecutionBenchmarkSuiteV184, log_atomic
 from .config_v185 import SettingsV185
 from .dashboard_v18 import DashboardServerV18, DashboardStateV18
 from .main_v182 import InactiveTakerExecutor
-from .profit_fok_v185 import ProfitFOKSuiteV185
+from .profit_fok_v185_diag import DiagnosedProfitFOKSuiteV185
 from .research_context_v185 import PHASE185_RUN_ID
 from .winner_research_v184 import WinnerResearchSuiteV184
 from . import runtime_controls_v18 as _runtime_controls_v18
@@ -21,7 +21,7 @@ def cli() -> None:
     _base.Settings = SettingsV185
     _base.MakerResearchSuite = WinnerResearchSuiteV184
     _base.ShadowExecutor = InactiveTakerExecutor
-    _base.DualFOKResearchSuite = ProfitFOKSuiteV185
+    _base.DualFOKResearchSuite = DiagnosedProfitFOKSuiteV185
     _base.IdealAtomicBenchmarkSuite = AtomicExecutionBenchmarkSuiteV184
     _base.log_atomic_diagnostics = log_atomic_diagnostics_v184
     _base.DashboardState = DashboardStateV18
