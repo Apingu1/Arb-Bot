@@ -7,8 +7,9 @@ import arb_bot.profit_fok_v185 as pfok185
 import arb_bot.profit_fok_v186 as pfok186
 from arb_bot.config_v186 import SettingsV186
 from arb_bot.discovery import MarketPhase
+from arb_bot.latency_runtime_v186 import LatencyFirstDualFOKSuiteV186, LatencyFirstMakerResearchSuiteV186, PreciseFastPFOKSuiteV186
 from arb_bot.models import MarketPair
-from arb_bot.profit_fok_v186 import FastPFOKSuiteV186, LatencyFirstDualFOKSuiteV186, LatencyFirstMakerResearchSuiteV186
+from arb_bot.profit_fok_v186 import FastPFOKSuiteV186
 from arb_bot.storage import JsonlRecorder
 from arb_bot.storage_v186 import LowLatencyJsonlRecorderV186
 from arb_bot.strategy_v186 import ArbitrageEngineV186
@@ -83,6 +84,7 @@ def test_v186_keeps_existing_control_frontier_and_adds_six_fast_models(tmp_path)
     assert "PFOK-EDGE3" in names
     assert {"PFOK-FAST1", "PFOK-FAST2", "PFOK-REQUOTE1", "PFOK-REQUOTE2", "PFOK-FAST-S10", "PFOK-FAST-S20"}.issubset(names)
     assert dual.fast is research.fast
+    assert isinstance(research.fast, PreciseFastPFOKSuiteV186)
 
 
 def test_v186_requote_can_survive_offsetting_leg_price_move(tmp_path, monkeypatch):
