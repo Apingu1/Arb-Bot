@@ -11,6 +11,9 @@ from .profit_fok_v185_diag import (
 from .winner_research_v184 import WinnerResearchSuiteV184
 
 
+ZERO = Decimal("0")
+
+
 class CorePFOKSuiteV187:
     """Only the sequential PFOK controls requested for Phase 1.8.7.
 
@@ -105,8 +108,41 @@ class ParallelBatchFOKSuiteV187:
         # BFOK precise timers/polling already run via the research wrapper.
         self.control.process_due(engine)
 
+    def _batch_diagnostic_rows(self):
+        rows = []
+        for variant in self.batch.variants:
+            row = dict(variant.diagnostic_row())
+            miss_values = list(getattr(variant, "miss_losses_per_share", []))
+            avg_miss = sum(miss_values, ZERO) / Decimal(len(miss_values)) if miss_values else ZERO
+            row.update(
+                {
+                    # Compatibility fields consumed by diagnostics_v16.
+                    "opportunities": int(row.get("candidates") or 0),
+                    "lifetime_samples": int(row.get("completed") or 0),
+                    "shares": (
+                        format(variant.fixed_size.normalize(), "f")
+                        if variant.fixed_size is not None
+                        else "EV"
+                    ),
+                    "edge_target": self.settings.v187_detection_min_edge_per_share,
+                    "arrival_skew_ms": 0,
+                    "coverage_multiple": self.settings.v187_detection_coverage_multiple,
+                    "stability_ms": 0,
+                    "base_latency_ms": self.settings.v187_batch_arrival_latency_ms,
+                    "avg_detected_edge": ZERO,
+                    "avg_detected_coverage": ZERO,
+                    "avg_miss_loss_per_share": avg_miss,
+                    "recovery_completions": variant.recovery_completions,
+                    "recovery_unwinds": variant.recovery_unwinds,
+                    "recovery_liquidity_failures": variant.recovery_liquidity_failures,
+                    "surge_blocks": variant.surge_blocks,
+                }
+            )
+            rows.append(row)
+        return rows
+
     def diagnostic_rows(self):
-        return [*self.control.diagnostic_rows(), *self.batch.diagnostic_rows()]
+        return [*self.control.diagnostic_rows(), *self._batch_diagnostic_rows()]
 
     def ranked_rows(self):
         rows = [row for row in self.diagnostic_rows() if row["placements"] > 0]
