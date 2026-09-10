@@ -4,6 +4,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 from .batch_fok_raw_v187 import BatchFOKWithRawSuiteV187
+from .opportunity_funnel_v187 import OpportunityFunnelV187
 from .profit_fok_v185_diag import (
     DiagnosedProfitFOKEngineV185,
     NamedDiagnosedProfitFOKEngineV185,
@@ -15,13 +16,7 @@ ZERO = Decimal("0")
 
 
 class CorePFOKSuiteV187:
-    """Only the sequential PFOK controls requested for Phase 1.8.7.
-
-    PFOK retains the exact inherited settings. PFOK-S10 and PFOK-S20 are the
-    same original execution/recovery engine with only fixed size substituted.
-    Older 1.8.5/1.8.6 exploratory variants remain untouched on their branches
-    but are not run here, reducing duplicate hot-path work.
-    """
+    """Only the sequential PFOK controls requested for Phase 1.8.7."""
 
     def __init__(self, settings, recorder) -> None:
         self.settings = settings
@@ -63,16 +58,19 @@ class CorePFOKSuiteV187:
 
 
 _BATCH_BY_RECORDER: dict[int, BatchFOKWithRawSuiteV187] = {}
+_FUNNEL_BY_RECORDER: dict[int, OpportunityFunnelV187] = {}
 
 
 class BatchFirstMakerResearchSuiteV187:
-    """Run BFOK-RAW/BFOK before the legacy research stack on every update."""
+    """Run BFOK-RAW/BFOK first and capture the opportunity funnel."""
 
     def __init__(self, settings, recorder) -> None:
         self.base = WinnerResearchSuiteV184(settings, recorder)
         self.regime = self.base.regime
         self.batch = BatchFOKWithRawSuiteV187(settings, recorder)
+        self.funnel = OpportunityFunnelV187(settings, recorder)
         _BATCH_BY_RECORDER[id(recorder)] = self.batch
+        _FUNNEL_BY_RECORDER[id(recorder)] = self.funnel
 
     def __getattr__(self, name):
         return getattr(self.base, name)
@@ -82,15 +80,17 @@ class BatchFirstMakerResearchSuiteV187:
         self.base.process_due(engine)
 
     def on_market_update(self, engine, market_id: str) -> None:
-        # Refresh surge/regime state, then evaluate RAW first inside the BFOK
-        # wrapper before the protected BFOK family.
+        # Refresh surge/regime state first. The funnel snapshots the observed
+        # market and protected BFOK entry reasons before RAW/BFOK mutate state.
         self.base.on_market_update(engine, market_id)
         surge = self.regime.current(market_id)
+        self.funnel.begin_update(engine, market_id, surge, self.batch)
         self.batch.on_market_update(engine, market_id, surge)
+        self.funnel.after_batch(market_id, self.batch)
 
 
 class ParallelBatchFOKSuiteV187:
-    """Dashboard/report surface: PFOK controls plus BFOK and BFOK-RAW."""
+    """Dashboard/report surface: PFOK controls plus BFOK/BFOK-RAW/funnel."""
 
     def __init__(self, settings, recorder) -> None:
         self.settings = settings
@@ -99,13 +99,20 @@ class ParallelBatchFOKSuiteV187:
         if self.batch is None:
             self.batch = BatchFOKWithRawSuiteV187(settings, recorder)
             _BATCH_BY_RECORDER[id(recorder)] = self.batch
+        self.funnel = _FUNNEL_BY_RECORDER.get(id(recorder))
+        if self.funnel is None:
+            self.funnel = OpportunityFunnelV187(settings, recorder)
+            _FUNNEL_BY_RECORDER[id(recorder)] = self.funnel
 
     def on_market_update(self, engine, market_id: str, surge=None) -> None:
-        # BFOK/BFOK-RAW already evaluated earlier by the maker research wrapper.
+        # BFOK/BFOK-RAW already ran earlier. Capture PFOK detection state before
+        # the PFOK controls mutate pending/candidate counters, then record exact
+        # same-update candidate-versus-block attribution for profitable RAW fills.
+        self.funnel.before_pfok(engine, market_id, surge, self.control)
         self.control.on_market_update(engine, market_id, surge)
+        self.funnel.after_pfok(market_id, self.control)
 
     def process_due(self, engine) -> None:
-        # BFOK timers/polling already run via the research wrapper.
         self.control.process_due(engine)
 
     def _batch_diagnostic_rows(self):
@@ -117,7 +124,6 @@ class ParallelBatchFOKSuiteV187:
             is_raw = variant.strategy == "BFOK-RAW"
             row.update(
                 {
-                    # Compatibility fields consumed by diagnostics_v16.
                     "opportunities": int(row.get("candidates") or 0),
                     "lifetime_samples": int(row.get("completed") or 0),
                     "shares": (
