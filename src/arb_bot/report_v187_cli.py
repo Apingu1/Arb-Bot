@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
 from statistics import median
@@ -14,6 +14,7 @@ from .report_v185_diag_cli import cli as cli_v185_diag
 from .report_v186_cli import _atomic_frontier, _fast_session_rewrite
 
 
+ZERO = Decimal("0")
 BFOK_NAMES = ["BFOK-1", "BFOK-5", "BFOK-10", "BFOK-20", "BFOK-EV"]
 CORE_NAMES = ["PFOK", "PFOK-S10", "PFOK-S20", *BFOK_NAMES]
 
@@ -63,12 +64,12 @@ def _bfok_table(path: Path, asset_filter: str | None) -> str:
         both = sum(1 for p in executions if p.get("status") == "BOTH_FILLED")
         miss = sum(1 for p in executions if p.get("status") == "ONE_LEG_MISS")
         none = sum(1 for p in executions if p.get("status") == "NEITHER_FILLED")
-        wins = sum(1 for p in executions if _d(p.get("realized_pnl")) > 0)
-        losses = sum(1 for p in executions if _d(p.get("realized_pnl")) < 0)
-        pnl = sum((_d(p.get("realized_pnl")) for p in executions), Decimal("0"))
+        wins = sum(1 for p in executions if _d(p.get("realized_pnl")) > ZERO)
+        losses = sum(1 for p in executions if _d(p.get("realized_pnl")) < ZERO)
+        pnl = sum((_d(p.get("realized_pnl")) for p in executions), ZERO)
         done = len(executions)
         p_both = both / done * 100 if done else 0.0
-        ev = pnl / Decimal(s["sub"]) if s["sub"] else Decimal("0")
+        ev = pnl / Decimal(s["sub"]) if s["sub"] else ZERO
         lines.append(
             f"{name:12s} {s['cand']:5d} {s['sub']:5d} {done:5d} {both:5d} {miss:5d} {none:5d} "
             f"{p_both:7.1f}% {wins:3d}/{losses:<3d} {float(pnl):+11.5f} {float(ev):+10.5f}"
@@ -150,7 +151,7 @@ def _ev_table(path: Path, asset_filter: str | None) -> str:
         s = by_size[shares]
         rate = s["pass"] / s["checks"] * 100 if s["checks"] else 0
         lines.append(
-            f"{shares:>6s} {s['checks']:7d} {s['pass']:6d} {rate:6.1f}% { _med(s['expected']):+12.5f} "
+            f"{shares:>6s} {s['checks']:7d} {s['pass']:6d} {rate:6.1f}% {_med(s['expected']):+12.5f} "
             f"{_med(s['pboth'])*100:11.1f}% {_med(s['pmiss'])*100:11.1f}% {_med(s['samples']):7.1f}"
         )
     return "\n".join(lines)
@@ -188,11 +189,11 @@ def _economics_table(path: Path, asset_filter: str | None) -> str:
         s = stats.get(name)
         if not s:
             continue
-        avg_win = sum(s["wins"], Decimal("0")) / Decimal(len(s["wins"])) if s["wins"] else Decimal("0")
-        avg_loss = sum(s["miss_losses"], Decimal("0")) / Decimal(len(s["miss_losses"])) if s["miss_losses"] else Decimal("0")
+        avg_win = sum(s["wins"], ZERO) / Decimal(len(s["wins"])) if s["wins"] else ZERO
+        avg_loss = sum(s["miss_losses"], ZERO) / Decimal(len(s["miss_losses"])) if s["miss_losses"] else ZERO
         denom = avg_win + avg_loss
-        be = avg_loss / denom * Decimal("100") if denom > ZERO else Decimal("0")
-        pnl = sum(s["all"], Decimal("0"))
+        be = avg_loss / denom * Decimal("100") if denom > ZERO else ZERO
+        pnl = sum(s["all"], ZERO)
         lines.append(
             f"{name:12s} {len(s['all']):6d} {float(avg_win):+11.5f} {float(avg_loss):14.5f} {float(be):10.1f}% {float(pnl):+11.5f}"
         )
@@ -224,7 +225,7 @@ def _episode_table(path: Path, asset_filter: str | None) -> str:
         market = str(p.get("market_id") or p.get("slug") or "UNKNOWN")
         by_key[(name, market)].append((ts, _d(p.get("realized_pnl"))))
 
-    stats = defaultdict(lambda: {"raw": Decimal("0"), "lower": Decimal("0"), "fills": 0, "episodes": 0})
+    stats = defaultdict(lambda: {"raw": ZERO, "lower": ZERO, "fills": 0, "episodes": 0})
     for (name, _market), rows in by_key.items():
         rows.sort()
         last = None
