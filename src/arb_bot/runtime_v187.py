@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from decimal import Decimal
 
-from .batch_fok_v187 import PreciseBatchFOKSuiteV187
+from .batch_fok_raw_v187 import BatchFOKWithRawSuiteV187
 from .profit_fok_v185_diag import (
     DiagnosedProfitFOKEngineV185,
     NamedDiagnosedProfitFOKEngineV185,
@@ -62,16 +62,16 @@ class CorePFOKSuiteV187:
         )
 
 
-_BATCH_BY_RECORDER: dict[int, PreciseBatchFOKSuiteV187] = {}
+_BATCH_BY_RECORDER: dict[int, BatchFOKWithRawSuiteV187] = {}
 
 
 class BatchFirstMakerResearchSuiteV187:
-    """Run BFOK before the legacy research stack on every update/timer turn."""
+    """Run BFOK-RAW/BFOK before the legacy research stack on every update."""
 
     def __init__(self, settings, recorder) -> None:
         self.base = WinnerResearchSuiteV184(settings, recorder)
         self.regime = self.base.regime
-        self.batch = PreciseBatchFOKSuiteV187(settings, recorder)
+        self.batch = BatchFOKWithRawSuiteV187(settings, recorder)
         _BATCH_BY_RECORDER[id(recorder)] = self.batch
 
     def __getattr__(self, name):
@@ -82,30 +82,30 @@ class BatchFirstMakerResearchSuiteV187:
         self.base.process_due(engine)
 
     def on_market_update(self, engine, market_id: str) -> None:
-        # Refresh surge/regime state first, then evaluate one shared BFOK book
-        # snapshot before hedge/frontier/PFOK/atomic research runs.
+        # Refresh surge/regime state, then evaluate RAW first inside the BFOK
+        # wrapper before the protected BFOK family.
         self.base.on_market_update(engine, market_id)
         surge = self.regime.current(market_id)
         self.batch.on_market_update(engine, market_id, surge)
 
 
 class ParallelBatchFOKSuiteV187:
-    """Dashboard/report surface: PFOK controls plus Phase 1.8.7 BFOK family."""
+    """Dashboard/report surface: PFOK controls plus BFOK and BFOK-RAW."""
 
     def __init__(self, settings, recorder) -> None:
         self.settings = settings
         self.control = CorePFOKSuiteV187(settings, recorder)
         self.batch = _BATCH_BY_RECORDER.get(id(recorder))
         if self.batch is None:
-            self.batch = PreciseBatchFOKSuiteV187(settings, recorder)
+            self.batch = BatchFOKWithRawSuiteV187(settings, recorder)
             _BATCH_BY_RECORDER[id(recorder)] = self.batch
 
     def on_market_update(self, engine, market_id: str, surge=None) -> None:
-        # BFOK already evaluated earlier by BatchFirstMakerResearchSuiteV187.
+        # BFOK/BFOK-RAW already evaluated earlier by the maker research wrapper.
         self.control.on_market_update(engine, market_id, surge)
 
     def process_due(self, engine) -> None:
-        # BFOK precise timers/polling already run via the research wrapper.
+        # BFOK timers/polling already run via the research wrapper.
         self.control.process_due(engine)
 
     def _batch_diagnostic_rows(self):
@@ -114,6 +114,7 @@ class ParallelBatchFOKSuiteV187:
             row = dict(variant.diagnostic_row())
             miss_values = list(getattr(variant, "miss_losses_per_share", []))
             avg_miss = sum(miss_values, ZERO) / Decimal(len(miss_values)) if miss_values else ZERO
+            is_raw = variant.strategy == "BFOK-RAW"
             row.update(
                 {
                     # Compatibility fields consumed by diagnostics_v16.
@@ -124,11 +125,11 @@ class ParallelBatchFOKSuiteV187:
                         if variant.fixed_size is not None
                         else "EV"
                     ),
-                    "edge_target": self.settings.v187_detection_min_edge_per_share,
+                    "edge_target": Decimal("-10") if is_raw else self.settings.v187_detection_min_edge_per_share,
                     "arrival_skew_ms": 0,
-                    "coverage_multiple": self.settings.v187_detection_coverage_multiple,
+                    "coverage_multiple": ZERO if is_raw else self.settings.v187_detection_coverage_multiple,
                     "stability_ms": 0,
-                    "base_latency_ms": self.settings.v187_batch_arrival_latency_ms,
+                    "base_latency_ms": 0 if is_raw else self.settings.v187_batch_arrival_latency_ms,
                     "avg_detected_edge": ZERO,
                     "avg_detected_coverage": ZERO,
                     "avg_miss_loss_per_share": avg_miss,
