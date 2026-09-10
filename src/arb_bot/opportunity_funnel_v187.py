@@ -24,11 +24,15 @@ class FunnelContextV187:
     slug: str
     asset: str
     observed_at: str
+    ready_books: bool
+    fresh_books: bool
     raw_before: dict[str, Any]
     bfok_before: dict[str, int]
-    bfok_reason: dict[str, str]
+    bfok_precondition: dict[str, str | None]
     pfok_before: dict[str, int] = field(default_factory=dict)
     pfok_reason: dict[str, str] = field(default_factory=dict)
+    standard_metrics: dict[Decimal, dict[str, Any]] = field(default_factory=dict)
+    extra_metrics: dict[Decimal, dict[str, Any] | None] = field(default_factory=dict)
     raw_attempted: bool = False
     raw_status: str | None = None
     raw_pnl: Decimal = ZERO
@@ -38,15 +42,12 @@ class FunnelContextV187:
 
 
 class OpportunityFunnelV187:
-    """Compact opportunity funnel plus RAW-win/protected-model attribution.
+    """Low-overhead funnel and RAW-win/protected-entry attribution.
 
-    Counts are accumulated in memory and written as compact rollups. A separate
-    sparse event is emitted only when BFOK-RAW completes a profitable pair. It
-    records whether each protected BFOK/PFOK model entered on that same market
-    update, or the specific detection-stage reason it did not.
-
-    This is an entry-attribution diagnostic, not a counterfactual guarantee that
-    a protected model would have filled at its later modeled arrival time.
+    The funnel reuses RAW and protected BFOK snapshots already built for the
+    strategies. It does not rebuild the full order book for every model. Only
+    PFOK's unique 2-share size can require one additional quote, memoized for
+    the current market update.
     """
 
     EDGE_THRESHOLDS = (
@@ -75,24 +76,15 @@ class OpportunityFunnelV187:
     def _depth_at_limit(levels: dict[Decimal, Decimal], limit: Decimal) -> Decimal:
         return sum((qty for px, qty in levels.items() if px <= limit), ZERO)
 
-    def _pair_metrics(self, engine, pair, shares: Decimal, *, max_age_ms: int | None) -> dict[str, Any] | None:
-        now = time.monotonic()
+    def _quote_metrics(self, engine, pair, shares: Decimal) -> dict[str, Any] | None:
         a = engine.books.get(pair.token_a)
         b = engine.books.get(pair.token_b)
         if a is None or b is None or not a.ready or not b.ready:
             return None
-        if max_age_ms is not None:
-            if (
-                a.updated_monotonic <= 0
-                or b.updated_monotonic <= 0
-                or (now - a.updated_monotonic) * 1000 > max_age_ms
-                or (now - b.updated_monotonic) * 1000 > max_age_ms
-            ):
-                return {"stale": True}
         qa = a.quote_buy(shares)
         qb = b.quote_buy(shares)
         if qa is None or qb is None:
-            return {"no_full_pair": True}
+            return None
         fee_a = taker_fee(qa.segments, self.settings.crypto_taker_fee_rate)
         fee_b = taker_fee(qb.segments, self.settings.crypto_taker_fee_rate)
         pnl = shares - qa.notional - qb.notional - fee_a - fee_b
@@ -106,105 +98,21 @@ class OpportunityFunnelV187:
             "coverage_b": cov_b,
         }
 
-    def _classify_bfok(self, engine, market_id: str, surge, variant) -> str:
-        pair = engine.pairs.get(market_id)
-        if pair is None or market_phase(pair) != MarketPhase.LIVE:
-            return "NOT_LIVE"
+    @staticmethod
+    def _precondition(market_id: str, surge, variant, *, family: str) -> str | None:
         now = time.monotonic()
         if market_id in variant.pending:
             return "PENDING"
         if now < variant.cooldown_until.get(market_id, 0.0):
             return "COOLDOWN"
-        if variant.settings.v187_use_surge_gate and surge is not None and surge.active:
+        use_surge = (
+            variant.settings.v187_use_surge_gate
+            if family == "BFOK"
+            else variant.settings.v185_use_surge_gate
+        )
+        if use_surge and surge is not None and surge.active:
             return "SURGE"
-
-        if variant.fixed_size is None:
-            accepted = False
-            saw_full = False
-            saw_edge = False
-            saw_cov = False
-            asset = asset_from_slug(pair.slug) or "UNKNOWN"
-            for shares in variant.settings.v187_ev_sizes:
-                metrics = self._pair_metrics(engine, pair, shares, max_age_ms=variant.settings.v187_max_book_age_ms)
-                if not metrics:
-                    continue
-                if metrics.get("stale"):
-                    return "STALE_BOOK"
-                if metrics.get("no_full_pair"):
-                    continue
-                saw_full = True
-                if metrics["edge"] < variant.settings.v187_detection_min_edge_per_share:
-                    continue
-                saw_edge = True
-                if metrics["coverage"] < variant.settings.v187_detection_coverage_multiple:
-                    continue
-                saw_cov = True
-                est = variant.risk_book.estimate(
-                    asset=asset,
-                    shares=shares,
-                    detected_edge=metrics["edge"],
-                    detected_pnl=metrics["pnl"],
-                )
-                if est["expected_pnl"] >= variant.settings.v187_ev_min_expected_pnl:
-                    accepted = True
-                    break
-            if accepted:
-                return "QUALIFIED"
-            if not saw_full:
-                return "NO_FULL_SIZE_PAIR"
-            if not saw_edge:
-                return "EDGE"
-            if not saw_cov:
-                return "COVERAGE"
-            return "EV_GATE"
-
-        metrics = self._pair_metrics(engine, pair, variant.fixed_size, max_age_ms=variant.settings.v187_max_book_age_ms)
-        if not metrics:
-            return "BOOK_NOT_READY"
-        if metrics.get("stale"):
-            return "STALE_BOOK"
-        if metrics.get("no_full_pair"):
-            return "NO_FULL_SIZE_PAIR"
-        if metrics["edge"] < variant.settings.v187_detection_min_edge_per_share:
-            return "EDGE"
-        if metrics["coverage"] < variant.settings.v187_detection_coverage_multiple:
-            return "COVERAGE"
-        return "QUALIFIED"
-
-    def _classify_pfok(self, engine, market_id: str, surge, variant) -> str:
-        pair = engine.pairs.get(market_id)
-        if pair is None or market_phase(pair) != MarketPhase.LIVE:
-            return "NOT_LIVE"
-        now = time.monotonic()
-        if market_id in variant.pending:
-            return "PENDING"
-        if now < variant.cooldown_until.get(market_id, 0.0):
-            return "COOLDOWN"
-        if variant.settings.v185_use_surge_gate and surge is not None and surge.active:
-            return "SURGE"
-
-        saw_full = False
-        saw_edge = False
-        for shares in sorted(variant.settings.v185_profit_sizes, reverse=True):
-            metrics = self._pair_metrics(engine, pair, shares, max_age_ms=variant.settings.v185_max_book_age_ms)
-            if not metrics:
-                continue
-            if metrics.get("stale"):
-                return "STALE_BOOK"
-            if metrics.get("no_full_pair"):
-                continue
-            saw_full = True
-            if metrics["edge"] < variant.settings.v185_detection_min_edge_per_share:
-                continue
-            saw_edge = True
-            if metrics["coverage"] < variant.settings.v185_detection_coverage_multiple:
-                continue
-            return "QUALIFIED"
-        if not saw_full:
-            return "NO_FULL_SIZE_PAIR"
-        if not saw_edge:
-            return "EDGE"
-        return "COVERAGE"
+        return None
 
     def begin_update(self, engine, market_id: str, surge, batch_suite) -> None:
         if not self.enabled:
@@ -220,33 +128,22 @@ class OpportunityFunnelV187:
         asset = asset_from_slug(pair.slug) or "UNKNOWN"
         a = engine.books.get(pair.token_a)
         b = engine.books.get(pair.token_b)
-        if a is not None and b is not None and a.ready and b.ready:
+        ready = bool(a is not None and b is not None and a.ready and b.ready)
+        fresh = False
+        if ready:
             self.counts["TWO_READY_BOOKS"] += 1
             now = time.monotonic()
             max_age = int(getattr(self.settings, "v187_max_book_age_ms", 25))
-            if (
+            fresh = bool(
                 a.updated_monotonic > 0
                 and b.updated_monotonic > 0
                 and (now - a.updated_monotonic) * 1000 <= max_age
                 and (now - b.updated_monotonic) * 1000 <= max_age
-            ):
+            )
+            if fresh:
                 self.counts["TWO_FRESH_BOOKS"] += 1
         if surge is not None and surge.active:
             self.counts["SURGE_ACTIVE"] += 1
-
-        raw_size = Decimal(str(getattr(self.settings, "v187_raw_size", Decimal("1"))))
-        raw_metrics = self._pair_metrics(engine, pair, raw_size, max_age_ms=None)
-        raw_edge = None
-        if raw_metrics and not raw_metrics.get("no_full_pair") and not raw_metrics.get("stale"):
-            self.counts["FULL_RAW_SIZE_PAIR"] += 1
-            raw_edge = raw_metrics["edge"]
-            if raw_metrics["coverage"] >= Decimal("1"):
-                self.counts["COVERAGE_GE_1X"] += 1
-            if raw_metrics["coverage"] >= Decimal("1.5"):
-                self.counts["COVERAGE_GE_1_5X"] += 1
-            for label, threshold in self.EDGE_THRESHOLDS:
-                if raw_edge >= threshold:
-                    self.counts[label] += 1
 
         raw = batch_suite.raw
         raw_before = {
@@ -257,23 +154,77 @@ class OpportunityFunnelV187:
             "equity": raw.equity.equity if raw is not None else ZERO,
         }
         bfok_before: dict[str, int] = {}
-        bfok_reason: dict[str, str] = {}
+        bfok_precondition: dict[str, str | None] = {}
         for variant in batch_suite.base.variants:
             bfok_before[variant.strategy] = variant.placements
-            reason = self._classify_bfok(engine, market_id, surge, variant)
-            bfok_reason[variant.strategy] = reason
-            self.model_reasons[variant.strategy][reason] += 1
+            bfok_precondition[variant.strategy] = self._precondition(
+                market_id, surge, variant, family="BFOK"
+            )
 
         self._active[market_id] = FunnelContextV187(
             market_id=market_id,
             slug=pair.slug,
             asset=asset,
             observed_at=_utc_now(),
+            ready_books=ready,
+            fresh_books=fresh,
             raw_before=raw_before,
             bfok_before=bfok_before,
-            bfok_reason=bfok_reason,
-            raw_edge=raw_edge,
+            bfok_precondition=bfok_precondition,
         )
+
+    def _bfok_reason(self, ctx: FunnelContextV187, variant) -> str:
+        pre = ctx.bfok_precondition.get(variant.strategy)
+        if pre:
+            return pre
+        if not ctx.ready_books:
+            return "BOOK_NOT_READY"
+        if not ctx.fresh_books:
+            return "STALE_BOOK"
+
+        if variant.fixed_size is not None:
+            metrics = ctx.standard_metrics.get(variant.fixed_size)
+            if metrics is None:
+                return "NO_FULL_SIZE_PAIR"
+            if metrics["edge"] < variant.settings.v187_detection_min_edge_per_share:
+                return "EDGE"
+            if metrics["coverage"] < variant.settings.v187_detection_coverage_multiple:
+                return "COVERAGE"
+            return "QUALIFIED"
+
+        saw_full = False
+        saw_edge = False
+        saw_cov = False
+        accepted = False
+        for shares in variant.settings.v187_ev_sizes:
+            metrics = ctx.standard_metrics.get(shares)
+            if metrics is None:
+                continue
+            saw_full = True
+            if metrics["edge"] < variant.settings.v187_detection_min_edge_per_share:
+                continue
+            saw_edge = True
+            if metrics["coverage"] < variant.settings.v187_detection_coverage_multiple:
+                continue
+            saw_cov = True
+            estimate = variant.risk_book.estimate(
+                asset=ctx.asset,
+                shares=shares,
+                detected_edge=metrics["edge"],
+                detected_pnl=metrics["pnl"],
+            )
+            if estimate["expected_pnl"] >= variant.settings.v187_ev_min_expected_pnl:
+                accepted = True
+                break
+        if accepted:
+            return "QUALIFIED"
+        if not saw_full:
+            return "NO_FULL_SIZE_PAIR"
+        if not saw_edge:
+            return "EDGE"
+        if not saw_cov:
+            return "COVERAGE"
+        return "EV_GATE"
 
     def after_batch(self, market_id: str, batch_suite) -> None:
         if not self.enabled:
@@ -281,6 +232,25 @@ class OpportunityFunnelV187:
         ctx = self._active.get(market_id)
         if ctx is None:
             return
+
+        standard = batch_suite.last_standard_snapshot
+        if standard is not None:
+            ctx.standard_metrics = dict(standard.metrics)
+
+        raw_size = Decimal(str(getattr(self.settings, "v187_raw_size", Decimal("1"))))
+        raw_snapshot = batch_suite.last_raw_snapshot
+        raw_metrics = raw_snapshot.metrics.get(raw_size) if raw_snapshot is not None else None
+        if raw_metrics is not None:
+            self.counts["FULL_RAW_SIZE_PAIR"] += 1
+            ctx.raw_edge = raw_metrics["edge"]
+            if raw_metrics["coverage"] >= Decimal("1"):
+                self.counts["COVERAGE_GE_1X"] += 1
+            if raw_metrics["coverage"] >= Decimal("1.5"):
+                self.counts["COVERAGE_GE_1_5X"] += 1
+            for label, threshold in self.EDGE_THRESHOLDS:
+                if ctx.raw_edge >= threshold:
+                    self.counts[label] += 1
+
         raw = batch_suite.raw
         if raw is not None:
             before = ctx.raw_before
@@ -311,9 +281,10 @@ class OpportunityFunnelV187:
                 self.counts["RAW_FLATS"] += 1
 
         for variant in batch_suite.base.variants:
+            reason = self._bfok_reason(ctx, variant)
+            self.model_reasons[variant.strategy][reason] += 1
             before = ctx.bfok_before.get(variant.strategy, variant.placements)
             entered = variant.placements > before
-            reason = ctx.bfok_reason.get(variant.strategy, "UNKNOWN")
             state = "SUBMITTED" if entered else "BLOCKED"
             if entered:
                 self.model_entries[variant.strategy] += 1
@@ -326,6 +297,43 @@ class OpportunityFunnelV187:
                 else:
                     self.raw_win_model_reasons[variant.strategy][reason] += 1
 
+    def _pfok_metrics(self, engine, ctx: FunnelContextV187, pair, shares: Decimal) -> dict[str, Any] | None:
+        if shares in ctx.standard_metrics:
+            return ctx.standard_metrics[shares]
+        if shares not in ctx.extra_metrics:
+            ctx.extra_metrics[shares] = self._quote_metrics(engine, pair, shares)
+        return ctx.extra_metrics[shares]
+
+    def _classify_pfok(self, engine, ctx: FunnelContextV187, surge, variant) -> str:
+        pre = self._precondition(ctx.market_id, surge, variant, family="PFOK")
+        if pre:
+            return pre
+        if not ctx.ready_books:
+            return "BOOK_NOT_READY"
+        if not ctx.fresh_books:
+            return "STALE_BOOK"
+        pair = engine.pairs.get(ctx.market_id)
+        if pair is None:
+            return "NOT_LIVE"
+        saw_full = False
+        saw_edge = False
+        for shares in sorted(variant.settings.v185_profit_sizes, reverse=True):
+            metrics = self._pfok_metrics(engine, ctx, pair, shares)
+            if metrics is None:
+                continue
+            saw_full = True
+            if metrics["edge"] < variant.settings.v185_detection_min_edge_per_share:
+                continue
+            saw_edge = True
+            if metrics["coverage"] < variant.settings.v185_detection_coverage_multiple:
+                continue
+            return "QUALIFIED"
+        if not saw_full:
+            return "NO_FULL_SIZE_PAIR"
+        if not saw_edge:
+            return "EDGE"
+        return "COVERAGE"
+
     def before_pfok(self, engine, market_id: str, surge, control_suite) -> None:
         if not self.enabled:
             return
@@ -334,7 +342,7 @@ class OpportunityFunnelV187:
             return
         for variant in control_suite.variants:
             ctx.pfok_before[variant.strategy] = variant.candidates
-            reason = self._classify_pfok(engine, market_id, surge, variant)
+            reason = self._classify_pfok(engine, ctx, surge, variant)
             ctx.pfok_reason[variant.strategy] = reason
             self.model_reasons[variant.strategy][reason] += 1
 
@@ -377,7 +385,7 @@ class OpportunityFunnelV187:
                     "raw_edge_per_share": ctx.raw_edge,
                     "all_protected_blocked": all_blocked,
                     "protected_models": ctx.protected,
-                    "note": "Same-update entry attribution only; it does not guarantee a protected model would later have filled.",
+                    "note": "Same-update entry attribution only; protected models still face their later modeled execution timing.",
                 },
             )
         self._maybe_rollup()
