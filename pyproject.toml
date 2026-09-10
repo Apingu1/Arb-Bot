@@ -22,7 +22,7 @@ dev = [
 
 [project.scripts]
 arb-bot = "arb_bot.main_v187:cli"
-arb-report = "arb_bot.report_v187_cli:cli"
+arb-report = "arb_bot.report_v187_raw_cli:cli"
 arb-ui = "arb_bot.dashboard_v17_cli:cli"
 
 [tool.setuptools.packages.find]
