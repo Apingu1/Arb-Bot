@@ -4,7 +4,7 @@ from . import main as _base
 from . import runtime_controls_v18 as _runtime_controls_v18
 from .atomic_benchmark_v184 import AtomicExecutionBenchmarkSuiteV184, log_atomic_diagnostics_v184
 from .config_v187 import SettingsV187
-from .dashboard_v186 import DashboardServerV186, DashboardStateV186
+from .dashboard_v187 import DashboardServerV187, DashboardStateV187
 from .main_v182 import InactiveTakerExecutor
 from .research_context_v187 import PHASE187_RUN_ID
 from .runtime_v187 import BatchFirstMakerResearchSuiteV187, ParallelBatchFOKSuiteV187
@@ -26,8 +26,8 @@ def cli() -> None:
     _base.DualFOKResearchSuite = ParallelBatchFOKSuiteV187
     _base.IdealAtomicBenchmarkSuite = AtomicExecutionBenchmarkSuiteV184
     _base.log_atomic_diagnostics = log_atomic_diagnostics_v184
-    _base.DashboardState = DashboardStateV186
-    _base.DashboardServer = DashboardServerV186
+    _base.DashboardState = DashboardStateV187
+    _base.DashboardServer = DashboardServerV187
 
     _ = PHASE187_RUN_ID
     _base.cli()
