@@ -18,25 +18,15 @@ from .profit_fok_v185 import ZERO
 class RawBatchFOKEngineV187(BatchFOKEngineV187):
     """Deliberately ungated zero-latency BFOK diagnostic.
 
-    This is an upper-bound research probe, not a live-execution model. It has:
-    - no minimum edge gate;
-    - no coverage-multiple gate;
-    - no surge gate;
-    - no book-age gate;
-    - no cooldown;
-    - zero modeled batch-arrival latency;
-    - zero modeled recovery latency.
-
-    It still requires structurally executable FOK orders: both books must be
-    ready and contain enough displayed depth for the configured RAW size. Fees
-    and all realized shadow P&L are still booked, including negative P&L.
+    This is an upper-bound research probe, not a live-execution model. It has
+    no minimum edge, coverage-multiple, surge, book-age, EV or cooldown gate,
+    and zero modeled batch-arrival/recovery latency. Structural requirements
+    remain: ready books and enough displayed depth for both FOK legs.
     """
 
     mode = "BATCH_FOK_RAW_V187"
 
     def _book_fresh(self, book, now: float) -> bool:
-        # RAW intentionally ignores book age. Readiness and displayed depth are
-        # structural execution requirements rather than strategy protection.
         return book is not None and book.ready
 
     def _common(self) -> dict[str, Any]:
@@ -61,10 +51,9 @@ class RawBatchFOKEngineV187(BatchFOKEngineV187):
 class BatchFOKWithRawSuiteV187:
     """Standard Phase 1.8.7 BFOK frontier plus BFOK-RAW.
 
-    BFOK-RAW is evaluated first on each market update and its zero-latency
-    arrival is processed immediately in the same callback. This intentionally
-    measures the observed-book upper bound. Standard BFOK variants remain
-    unchanged and keep their real 1 ms shadow-arrival timing and protections.
+    RAW is evaluated first. The protected BFOK snapshot is then built exactly
+    once and shared both by all protected BFOK variants and the opportunity
+    funnel, avoiding duplicate full-book quoting on the latency-sensitive path.
     """
 
     def __init__(self, settings, recorder) -> None:
@@ -72,6 +61,8 @@ class BatchFOKWithRawSuiteV187:
         self.recorder = recorder
         self.base = PreciseBatchFOKSuiteV187(settings, recorder)
         self.risk_book = self.base.risk_book
+        self.last_raw_snapshot: SharedBatchSnapshotV187 | None = None
+        self.last_standard_snapshot: SharedBatchSnapshotV187 | None = None
 
         self.raw: RawBatchFOKEngineV187 | None = None
         if getattr(settings, "v187_raw_enabled", True):
@@ -145,18 +136,25 @@ class BatchFOKWithRawSuiteV187:
         return SharedBatchSnapshotV187(market_id, pair, started, time.monotonic(), metrics)
 
     def on_market_update(self, engine, market_id: str, surge=None) -> None:
-        # RAW goes first and intentionally completes at zero modeled latency so
-        # it cannot be delayed by the standard BFOK snapshot/research work.
+        # RAW first, processed immediately at its explicit zero-latency upper
+        # bound so later protected research cannot delay this diagnostic.
+        self.last_raw_snapshot = None
+        self.last_standard_snapshot = None
         if self.raw is not None:
-            snapshot = self._build_raw_snapshot(engine, market_id)
-            if snapshot is not None:
-                self.raw.on_market_update_from_snapshot(snapshot, surge=None)
+            self.last_raw_snapshot = self._build_raw_snapshot(engine, market_id)
+            if self.last_raw_snapshot is not None:
+                self.raw.on_market_update_from_snapshot(self.last_raw_snapshot, surge=None)
                 self.raw.process_due(engine)
-                # A zero-latency one-leg result can schedule zero-latency
-                # recovery; service it immediately as well.
                 self.raw.process_due(engine)
 
-        self.base.on_market_update(engine, market_id, surge)
+        # Build the protected snapshot once. This reproduces
+        # PreciseBatchFOKSuiteV187.on_market_update without rebuilding the same
+        # quotes a second time for funnel diagnostics.
+        self.last_standard_snapshot = self.base._build_snapshot(engine, market_id)
+        if self.last_standard_snapshot is not None:
+            for variant in self.base.variants:
+                variant.on_market_update_from_snapshot(self.last_standard_snapshot, surge)
+            self.base._arm_timer(engine)
 
     def process_due(self, engine) -> None:
         if self.raw is not None:
