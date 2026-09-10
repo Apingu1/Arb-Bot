@@ -3,13 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from .config import _bool, _decimal
+from .config import _bool, _decimal, _int
 from .config_v187 import SettingsV187
 
 
 @dataclass(frozen=True, slots=True)
 class SettingsV187Raw(SettingsV187):
-    """Phase 1.8.7 settings with the deliberately ungated BFOK-RAW probe.
+    """Phase 1.8.7 settings with BFOK-RAW and opportunity-funnel diagnostics.
 
     BFOK-RAW is a research upper-bound / stress model, not a deployable live
     execution claim. It removes strategy-level opportunity filters and runs at
@@ -23,4 +23,15 @@ class SettingsV187Raw(SettingsV187):
     )
     v187_raw_size: Decimal = field(
         default_factory=lambda: _decimal("V187_RAW_SIZE", "1")
+    )
+
+    # Compact opportunity funnel. Counts every market update in memory and
+    # writes one rollup every few seconds instead of one telemetry row per gate.
+    # Profitable RAW completions receive sparse same-update attribution showing
+    # whether each protected BFOK/PFOK model entered or which gate blocked it.
+    v187_funnel_enabled: bool = field(
+        default_factory=lambda: _bool("V187_FUNNEL_ENABLED", True)
+    )
+    v187_funnel_rollup_seconds: int = field(
+        default_factory=lambda: _int("V187_FUNNEL_ROLLUP_SECONDS", 5)
     )
