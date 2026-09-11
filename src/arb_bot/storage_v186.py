@@ -31,6 +31,16 @@ class LowLatencyJsonlRecorderV186(JsonlRecorder):
     handles open, flushes important strategy events immediately, and converts
     raw gate samples into exact-count periodic rollups.
 
+    Phase 1.8.7 also contains the deliberately hyper-active BFOK-RAW diagnostic.
+    Per-attempt RAW events are *not* persisted to JSONL because RAW can generate
+    hundreds of thousands of executions in minutes and `strategy_equity` is a
+    critical/flush-on-write event. Persisting those events caused multi-GB
+    session files and, more importantly, synchronous disk flushes on the same
+    latency-sensitive process being measured. RAW events are still forwarded to
+    live listeners (so the dashboard can update), while durable RAW statistics
+    come from compact opportunity-funnel rollups and sparse RAW-win attribution
+    events.
+
     A second buffered current-session JSONL is maintained so `arb-report
     --session` can avoid rescanning the full historical file. It contains only
     the current process and is truncated at recorder construction.
@@ -73,17 +83,20 @@ class LowLatencyJsonlRecorderV186(JsonlRecorder):
     def _median(values: list[float]) -> float | None:
         return float(median(values)) if values else None
 
+    def _notify(self, event_type: str, payload: Any) -> None:
+        for listener in tuple(self._listeners):
+            try:
+                listener(event_type, payload)
+            except Exception:
+                continue
+
     def _raw_write(self, event_type: str, payload: Any, *, notify: bool = True) -> None:
         row = {"event_type": event_type, "payload": payload}
         encoded = json.dumps(row, default=self._default, separators=(",", ":")) + "\n"
         self._main.write(encoded)
         self._session.write(encoded)
         if notify:
-            for listener in tuple(self._listeners):
-                try:
-                    listener(event_type, payload)
-                except Exception:
-                    continue
+            self._notify(event_type, payload)
 
     def _append_sample(self, target: list[float], raw: Any) -> None:
         if raw is None or len(target) >= self._sample_cap:
@@ -143,6 +156,22 @@ class LowLatencyJsonlRecorderV186(JsonlRecorder):
 
     def write(self, event_type: str, payload: Any) -> None:
         now = time.monotonic()
+
+        # BFOK-RAW is intentionally capable of firing on nearly every market
+        # update. Keep it off the durable hot path. The opportunity funnel owns
+        # compact persistent RAW counts/P&L and raw_win_attribution_v187 owns the
+        # sparse detailed winning cases. We still notify live listeners so the
+        # existing dashboard remains useful during a run.
+        if isinstance(payload, dict) and payload.get("strategy") == "BFOK-RAW":
+            self._notify(event_type, payload)
+            if now >= self._next_rollup:
+                self._flush_gate_rollups(now)
+            if now >= self._next_flush:
+                self._main.flush()
+                self._session.flush()
+                self._next_flush = now + self._flush_interval
+            return
+
         if event_type == "profit_fok_gate_sample_v185":
             self._collect_gate(payload)
             if now >= self._next_rollup:
