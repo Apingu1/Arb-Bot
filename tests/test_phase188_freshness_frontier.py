@@ -5,6 +5,7 @@ import time
 from decimal import Decimal
 from types import SimpleNamespace
 
+import arb_bot.batch_fok_raw_v187 as raw187
 import arb_bot.batch_fok_v187 as bfok187
 from arb_bot.batch_fok_raw_v187 import BatchFOKWithRawSuiteV187
 from arb_bot.config_v188 import SettingsV188
@@ -67,6 +68,11 @@ def _engine(settings: SettingsV188) -> ArbitrageEngineV186:
     return engine
 
 
+def _patch_live(monkeypatch) -> None:
+    monkeypatch.setattr(raw187, "market_phase", lambda pair: MarketPhase.LIVE)
+    monkeypatch.setattr(bfok187, "market_phase", lambda pair: MarketPhase.LIVE)
+
+
 def test_freshness_defaults_are_controlled_frontier():
     settings = SettingsV188()
     assert settings.v188_freshness_frontier_enabled is True
@@ -75,7 +81,7 @@ def test_freshness_defaults_are_controlled_frontier():
 
 
 def test_only_age_limit_changes_candidate_entry(tmp_path, monkeypatch):
-    monkeypatch.setattr(bfok187, "market_phase", lambda pair: MarketPhase.LIVE)
+    _patch_live(monkeypatch)
     settings = _settings()
     recorder = JsonlRecorder(str(tmp_path / "freshness.jsonl"))
     raw_suite = BatchFOKWithRawSuiteV187(settings, recorder)
@@ -115,7 +121,7 @@ def test_only_age_limit_changes_candidate_entry(tmp_path, monkeypatch):
 
 
 def test_freshness_execution_records_detection_and_arrival_age(tmp_path, monkeypatch):
-    monkeypatch.setattr(bfok187, "market_phase", lambda pair: MarketPhase.LIVE)
+    _patch_live(monkeypatch)
     settings = _settings(v188_freshness_ages_ms=(50,))
     recorder = JsonlRecorder(str(tmp_path / "freshness.jsonl"))
     raw_suite = BatchFOKWithRawSuiteV187(settings, recorder)
