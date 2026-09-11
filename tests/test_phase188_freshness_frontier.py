@@ -12,6 +12,7 @@ from arb_bot.config_v188 import SettingsV188
 from arb_bot.discovery import MarketPhase
 from arb_bot.freshness_frontier_v188 import FreshnessFrontierSuiteV188
 from arb_bot.models import MarketPair
+from arb_bot.runtime_v188 import BatchFirstMakerResearchSuiteV188
 from arb_bot.storage import JsonlRecorder
 from arb_bot.storage_v186 import LowLatencyJsonlRecorderV186
 from arb_bot.strategy_v186 import ArbitrageEngineV186
@@ -148,6 +149,45 @@ def test_freshness_execution_records_detection_and_arrival_age(tmp_path, monkeyp
     assert Decimal(str(event["arrival_older_book_age_ms"])) >= Decimal(str(event["detected_older_book_age_ms"]))
     assert Decimal(str(event["arrival_market_edge_per_share"])) > 0
     assert Decimal(str(event["realized_pnl"])) > 0
+
+
+def test_runtime_raw_win_age_uses_strategy_equity_counter(tmp_path, monkeypatch):
+    """Regression: runtime must not reference a nonexistent raw.wins field.
+
+    The first v1.8.8 build did exactly that after RAW execution. The resulting
+    AttributeError happened before the freshness suite was called, which made
+    every BFOK-FRESH row remain IDLE and suppressed raw_win_age_v188 events.
+    """
+    _patch_live(monkeypatch)
+    settings = _settings(v188_freshness_ages_ms=(50,))
+    recorder = JsonlRecorder(str(tmp_path / "runtime.jsonl"))
+    raw_suite = BatchFOKWithRawSuiteV187(settings, recorder)
+    fresh_suite = FreshnessFrontierSuiteV188(settings, recorder)
+    engine = _engine(settings)
+    surge = SimpleNamespace(active=False)
+
+    raw_suite.on_market_update(engine, "fresh188", surge=surge)
+    assert raw_suite.raw is not None
+    assert raw_suite.raw.equity.wins == 1
+
+    runtime = object.__new__(BatchFirstMakerResearchSuiteV188)
+    runtime.settings = settings
+    runtime.recorder = recorder
+    runtime.batch = raw_suite
+    runtime.freshness = fresh_suite
+    runtime._record_raw_win_age(
+        engine,
+        "fresh188",
+        before_wins=0,
+        before_equity=Decimal("0"),
+    )
+
+    rows = [json.loads(line) for line in (tmp_path / "runtime.jsonl").read_text().splitlines()]
+    age_rows = [r["payload"] for r in rows if r["event_type"] == "raw_win_age_v188"]
+    assert len(age_rows) == 1
+    assert age_rows[0]["source_strategy"] == "BFOK-RAW"
+    assert Decimal(str(age_rows[0]["raw_pnl"])) > 0
+    assert age_rows[0]["older_book_age_ms"] is not None
 
 
 def test_low_latency_recorder_does_not_persist_per_attempt_raw_events(tmp_path, monkeypatch):
