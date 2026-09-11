@@ -37,7 +37,12 @@ class BatchFirstMakerResearchSuiteV188:
     def _record_raw_win_age(self, engine, market_id: str, before_wins: int, before_equity: Decimal) -> None:
         raw = self.batch.raw
         snapshot = self.batch.last_raw_snapshot
-        if raw is None or snapshot is None or raw.wins <= before_wins:
+        # Win/loss counters live on StrategyEquity. The original v1.8.8 wiring
+        # accidentally referenced raw.wins, which does not exist on the BFOK
+        # engine. That exception occurred immediately after RAW processed each
+        # update, preventing both RAW-win age telemetry and the downstream
+        # freshness frontier from running. Use the authoritative equity counter.
+        if raw is None or snapshot is None or raw.equity.wins <= before_wins:
             return
         raw_size = self.settings.v187_raw_size
         metrics = snapshot.metrics.get(raw_size)
