@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections import Counter
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -11,6 +12,10 @@ from .research_context_v189 import PHASE189_RUN_ID
 
 
 ZERO = Decimal("0")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class RawOpportunityObserverV189:
@@ -67,6 +72,7 @@ class RawOpportunityObserverV189:
                     "phase189_run_id": PHASE189_RUN_ID,
                     "strategy": self.strategy,
                     "mode": self.mode,
+                    "rolled_at": _utc_now(),
                     "window_seconds": self.rollup_seconds,
                     "counts": dict(self._counts),
                     "positive_pnl_upper_bound": self._rollup_positive_pnl,
@@ -131,6 +137,7 @@ class RawOpportunityObserverV189:
                     "phase189_run_id": PHASE189_RUN_ID,
                     "strategy": self.strategy,
                     "mode": self.mode,
+                    "observed_at": _utc_now(),
                     "market_id": market_id,
                     "slug": pair.slug,
                     "asset": asset_from_slug(pair.slug) or "UNKNOWN",
@@ -160,9 +167,6 @@ class RawOpportunityObserverV189:
         self._maybe_rollup(force=True)
 
     def diagnostic_row(self) -> dict[str, Any]:
-        # The dashboard row deliberately exposes only positive observations as
-        # upper-bound candidates. It does not present non-positive observations
-        # as synthetic trading losses and does not contribute StrategyEquity.
         count = self.positive
         return {
             "strategy": self.strategy,
@@ -177,9 +181,7 @@ class RawOpportunityObserverV189:
             "misses": 0,
             "p_both": Decimal("1") if count else ZERO,
             "p_miss": ZERO,
-            "ev_per_placement": (
-                self.positive_pnl_upper_bound / Decimal(count) if count else ZERO
-            ),
+            "ev_per_placement": self.positive_pnl_upper_bound / Decimal(count) if count else ZERO,
             "equity": ZERO,
             "avg_lifetime_ms": ZERO,
             "median_lifetime_ms": ZERO,
