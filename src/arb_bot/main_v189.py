@@ -4,6 +4,7 @@ from . import main as _base
 from . import runtime_controls_v18 as _runtime_controls_v18
 from .config_v189 import SettingsV189
 from .dashboard_v187 import DashboardServerV187, DashboardStateV187
+from .diagnostics_v189 import log_latency_isolation_diagnostics_v189
 from .main_v182 import InactiveTakerExecutor
 from .research_context_v189 import PHASE189_RUN_ID
 from .runtime_v189 import (
@@ -55,6 +56,7 @@ def cli() -> None:
     _base.ShadowExecutor = InactiveTakerExecutor
     _base.DualFOKResearchSuite = ParallelBatchFOKSuiteV189
     _base.IdealAtomicBenchmarkSuite = InactiveAtomicBenchmarkV189
+    _base.log_dual_fok_diagnostics = log_latency_isolation_diagnostics_v189
     _base.log_atomic_diagnostics = _no_atomic_diagnostics
     _base.DashboardState = DashboardStateV187
     _base.DashboardServer = DashboardServerV187

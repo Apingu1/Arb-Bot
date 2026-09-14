@@ -34,6 +34,11 @@ class PolymarketMarketStream:
                             for message in messages:
                                 if isinstance(message, dict):
                                     await handler(message)
+                            # ``handler`` is async for API compatibility but the
+                            # strategy hot path intentionally contains no await.
+                            # Under a continuously-ready socket that can starve
+                            # diagnostics/timers until the stream is cancelled.
+                            await asyncio.sleep(0)
                     finally:
                         heartbeat.cancel()
                         await asyncio.gather(heartbeat, return_exceptions=True)

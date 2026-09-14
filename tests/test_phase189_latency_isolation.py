@@ -7,11 +7,12 @@ from decimal import Decimal
 import arb_bot.batch_fok_v187 as bfok187
 import arb_bot.raw_observer_v189 as raw189
 from arb_bot.config_v189 import SettingsV189
+from arb_bot.diagnostics_v189 import log_latency_isolation_diagnostics_v189
 from arb_bot.discovery import MarketPhase
 from arb_bot.latency_frontier_v189 import LatencyFrontierSuiteV189
 from arb_bot.models import MarketPair
 from arb_bot.raw_observer_v189 import RawOpportunityObserverV189
-from arb_bot.runtime_v189 import ProtectedBatchSuiteV189
+from arb_bot.runtime_v189 import ParallelBatchFOKSuiteV189, ProtectedBatchSuiteV189
 from arb_bot.storage import JsonlRecorder
 from arb_bot.strategy_v186 import ArbitrageEngineV186
 
@@ -81,6 +82,27 @@ def test_v189_defaults_remove_full_raw_and_freshness_load():
     assert settings.v189_latency_targets_ms == (0, 1, 2, 3, 5)
     assert settings.v189_latency_size == Decimal("1")
     assert settings.v189_raw_observer_enabled is True
+
+
+def test_v189_mixed_diagnostics_do_not_crash(caplog, tmp_path):
+    settings = _settings(v187_use_surge_gate=False)
+    recorder = JsonlRecorder(str(tmp_path / "diagnostics.jsonl"))
+
+    # Construction order matches main.run: research creates the shared BFOK,
+    # latency and RAW surfaces before the dashboard/diagnostic wrapper.
+    from arb_bot.runtime_v189 import LatencyIsolationResearchSuiteV189
+
+    LatencyIsolationResearchSuiteV189(settings, recorder)
+    suite = ParallelBatchFOKSuiteV189(settings, recorder)
+
+    with caplog.at_level("INFO"):
+        log_latency_isolation_diagnostics_v189(suite)
+
+    output = caplog.text
+    assert "PFOK |" in output
+    assert "BFOK-1 |" in output
+    assert "BFOK-LAT0 |" in output
+    assert "RAW-OBS |" in output
 
 
 def test_v189_raw_observer_does_not_persist_negative_attempts(tmp_path, monkeypatch):
