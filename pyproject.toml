@@ -17,12 +17,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8,<9",
-  "pytest-asyncio>=0.24,<1",
+  "pytest-asyncio<1,>=0.24",
 ]
 
 [project.scripts]
-arb-bot = "arb_bot.main_v188:cli"
-arb-report = "arb_bot.report_v188_cli:cli"
+arb-bot = "arb_bot.main_v189:cli"
+arb-report = "arb_bot.report_v189_cli:cli"
 arb-ui = "arb_bot.dashboard_v17_cli:cli"
 
 [tool.setuptools.packages.find]
