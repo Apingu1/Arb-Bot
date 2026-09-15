@@ -15,6 +15,11 @@ class TokenBook:
         self.bids: dict[Decimal, Decimal] = {}
         self.asks: dict[Decimal, Decimal] = {}
         self.updated_monotonic: float = 0.0
+        # Monotonic local revision used by shadow-capacity diagnostics.  It is
+        # deliberately observational: strategy execution never mutates the
+        # live book, but reports can distinguish repeated reads of one book
+        # image from a genuinely newer exchange update.
+        self.revision: int = 0
         self.exchange_timestamp: str | None = None
         self.ready = False
         self.last_trade_price: Decimal | None = None
@@ -28,6 +33,7 @@ class TokenBook:
         self.asks = self._levels_to_dict(asks)
         self.exchange_timestamp = timestamp
         self.updated_monotonic = time.monotonic()
+        self.revision += 1
         self.ready = True
 
     def apply_change(self, side: str, price: str, size: str, timestamp: str | None = None) -> None:
@@ -40,6 +46,7 @@ class TokenBook:
             levels[px] = qty
         self.exchange_timestamp = timestamp
         self.updated_monotonic = time.monotonic()
+        self.revision += 1
 
     def apply_trade(self, price: str, size: str | None, side: str, timestamp: str | None = None) -> None:
         self.last_trade_price = Decimal(str(price))

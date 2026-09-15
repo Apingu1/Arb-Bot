@@ -227,6 +227,27 @@ async def run() -> None:
     dashboard_task = asyncio.create_task(dashboard_loop(), name="dashboard-publisher") if settings.dashboard_enabled else None
     tasks = [timer_task, diagnostic_task] + ([dashboard_task] if dashboard_task is not None else [])
 
+    def report_background_failure(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            log.error(
+                "Background task %s failed: %s",
+                task.get_name(),
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    for task in tasks:
+        task.add_done_callback(report_background_failure)
+
+    stream_task: asyncio.Task | None = None
+    subscribed_token_ids: frozenset[str] = frozenset()
+
     try:
         while True:
             if settings.run_seconds and time.monotonic() - started >= settings.run_seconds:
@@ -270,19 +291,51 @@ async def run() -> None:
             process_strategy_timers()
             publish_dashboard()
             token_ids = [token for pair in stream_pairs for token in (pair.token_a, pair.token_b)]
+            requested_token_ids = frozenset(token_ids)
+            if stream_task is None or stream_task.done():
+                if stream_task is not None:
+                    await asyncio.gather(stream_task, return_exceptions=True)
+                stream_task = asyncio.create_task(
+                    stream.run(token_ids, handle),
+                    name="polymarket-market-stream",
+                )
+                subscribed_token_ids = requested_token_ids
+            elif requested_token_ids != subscribed_token_ids:
+                log.info(
+                    "Market token set changed (%d -> %d); restarting WebSocket subscription",
+                    len(subscribed_token_ids),
+                    len(requested_token_ids),
+                )
+                stream_task.cancel()
+                await asyncio.gather(stream_task, return_exceptions=True)
+                stream_task = asyncio.create_task(
+                    stream.run(token_ids, handle),
+                    name="polymarket-market-stream",
+                )
+                subscribed_token_ids = requested_token_ids
+            else:
+                log.info(
+                    "Market token set unchanged (%d); preserving WebSocket subscription",
+                    len(subscribed_token_ids),
+                )
+
             refresh = settings.market_refresh_seconds
             if settings.run_seconds:
                 remaining = settings.run_seconds - (time.monotonic() - started)
                 refresh = max(0.1, min(refresh, remaining))
             try:
-                await asyncio.wait_for(stream.run(token_ids, handle), timeout=refresh)
-            except TimeoutError:
+                await asyncio.sleep(refresh)
+                if settings.run_seconds and time.monotonic() - started >= settings.run_seconds:
+                    break
                 process_strategy_timers()
                 publish_dashboard()
                 log.info("Refreshing active-market discovery")
             except asyncio.CancelledError:
                 raise
     finally:
+        if stream_task is not None:
+            stream_task.cancel()
+            await asyncio.gather(stream_task, return_exceptions=True)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

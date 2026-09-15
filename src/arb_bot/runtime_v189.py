@@ -105,7 +105,7 @@ class LatencyIsolationResearchSuiteV189:
         )
 
         # Observation-only RAW is deliberately last on the hot path.
-        self.raw.on_market_update(engine, market_id)
+        self.raw.on_market_update(engine, market_id, surge)
 
     def process_due(self, engine) -> None:
         self.latency.process_due(engine)

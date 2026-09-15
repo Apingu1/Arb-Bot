@@ -83,7 +83,7 @@ class RawOpportunityObserverV189:
         self._rollup_positive_pnl = ZERO
         self._last_rollup = now
 
-    def on_market_update(self, engine, market_id: str) -> None:
+    def on_market_update(self, engine, market_id: str, surge=None) -> None:
         if not self.enabled:
             return
         self.observations += 1
@@ -149,6 +149,13 @@ class RawOpportunityObserverV189:
                     "book_age_b_ms": age_b,
                     "older_book_age_ms": max(age_a, age_b) if age_a is not None and age_b is not None else None,
                     "book_age_skew_ms": skew,
+                    "book_revision_a": getattr(a, "revision", None),
+                    "book_revision_b": getattr(b, "revision", None),
+                    "surge_active": bool(getattr(surge, "active", False)),
+                    "surge_reasons": list(getattr(surge, "reasons", ()) or ()),
+                    "surge_move_1s": getattr(surge, "move_1s", None),
+                    "surge_move_3s": getattr(surge, "move_3s", None),
+                    "surge_updates_per_second": getattr(surge, "updates_per_second", None),
                     "observation_only": True,
                     "execution_latency_ms": None,
                     "note": "Positive local-book observation only; not a fill or deployable P&L claim.",
