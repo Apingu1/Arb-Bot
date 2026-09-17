@@ -267,6 +267,31 @@ def _episode_table(path: Path, asset_filter: str | None) -> str:
 
 def cli() -> None:
     original_argv = list(sys.argv)
+    if "--phase1810-cumulative" in original_argv:
+        parser = argparse.ArgumentParser(
+            description="Fast one-pass cumulative Phase 1.8.10 validation report"
+        )
+        parser.add_argument(
+            "--phase1810-cumulative",
+            nargs="?",
+            const=SettingsV1810().v1810_session_archive_dir,
+            required=True,
+            metavar="PATH",
+            help="Compact archive directory or a previously concatenated compact JSONL file",
+        )
+        parser.add_argument("--asset", default=None)
+        parser.add_argument(
+            "--all",
+            action="store_true",
+            help="Accepted for compatibility; cumulative mode already includes every Phase 1.8.10 section",
+        )
+        args = parser.parse_args(original_argv[1:])
+        from .report_v1810a import cumulative_report
+
+        asset_filter = args.asset.upper() if args.asset else None
+        print(cumulative_report(Path(args.phase1810_cumulative), asset_filter))
+        return
+
     _base.cli()
 
     parser = argparse.ArgumentParser(add_help=False)
