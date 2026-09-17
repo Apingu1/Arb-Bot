@@ -36,11 +36,26 @@ Generate a report for the current process:
 arb-report --session --all | tee data/phase1_8_10_report.txt
 ```
 
-Generate a cumulative report across compatible Phase 1.8.10 runs:
+Generate the fast cumulative report across all compact Phase 1.8.10 run
+archives:
 
 ```bash
-arb-report --all | tee data/phase1_8_10_cumulative_report.txt
+arb-report --phase1810-cumulative | tee data/phase1_8_10a_cumulative_report.txt
 ```
+
+This mode does not rescan the multi-million-line historical event file. It
+reads each `data/phase1810_sessions/phase1810_*.jsonl` archive once and then
+calculates all report sections in memory. A compact file can also be supplied
+explicitly:
+
+```bash
+arb-report --phase1810-cumulative data/phase1_8_10_compact_cumulative.jsonl
+```
+
+The report compares 500 ms, 5 second, 30 second and 60 second quiet-gap
+definitions. Runs are always kept separate. It reports one-trade-per-episode
+P&L, P&L excluding the best episode, concentration, asset/regime breakdowns,
+BFOK-10 miss losses and PASS/FAIL validation gates.
 
 ## Decision rule
 
@@ -51,3 +66,7 @@ Do not progress to live-readiness work until the cumulative evidence contains:
 - positive BFOK-10 P&L after its single best episode is removed;
 - acceptable one-leg miss losses; and
 - evidence across multiple time windows rather than one isolated surge.
+
+For a deterministic report gate, BFOK-10 first-trade one-leg miss losses may
+consume no more than 25% of its gross winning P&L. This reporting threshold
+does not change execution or entry settings.
